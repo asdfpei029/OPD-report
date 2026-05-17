@@ -1,0 +1,1329 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>醫療報告重點擷取助手</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f4f6fa;
+    --card: #ffffff;
+    --sub-bg: #eef1f7;
+    --primary: #2563eb;
+    --primary-dark: #1d4ed8;
+    --text: #1a2340;
+    --sub-text: #5a6a8a;
+    --border: #dde3ef;
+    --green: #16a34a;
+    --red: #dc2626;
+    --yellow: #d97706;
+    --teal: #0d9488;
+    --indigo: #4f46e5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Noto Sans TC', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+
+  /* Spinner */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    width: 20px; height: 20px;
+    border: 3px solid #c7d2fe;
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    display: inline-block;
+  }
+
+  /* Tabs */
+  .tab-btn {
+    padding: 8px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1.5px solid transparent;
+    transition: all 0.15s;
+    background: var(--sub-bg);
+    color: var(--sub-text);
+  }
+  .tab-btn.active {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+
+  /* Input Card */
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    box-shadow: 0 2px 12px rgba(37,99,235,0.07);
+    border: 1px solid var(--border);
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 180px;
+    padding: 12px;
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.6;
+    resize: vertical;
+    color: var(--text);
+    background: #fafbff;
+    transition: border-color 0.15s;
+    outline: none;
+  }
+  textarea:focus { border-color: var(--primary); }
+
+  /* Drop Zone */
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    text-align: center;
+    transition: all 0.2s;
+    cursor: pointer;
+    position: relative;
+    background: #fafbff;
+  }
+  .drop-zone:hover, .drop-zone.active {
+    border-color: var(--primary);
+    background: #eff6ff;
+  }
+  .drop-zone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+
+  /* Action Group */
+  .action-group {
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 10px;
+  }
+  .action-group.blue { background: #eff6ff; border: 1px solid #bfdbfe; }
+  .action-group.indigo { background: #eef2ff; border: 1px solid #c7d2fe; }
+  .action-group.teal { background: #f0fdfa; border: 1px solid #99f6e4; }
+
+  /* Analyze Buttons */
+  .btn-analyze {
+    width: 100%;
+    padding: 11px 16px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1.5px solid transparent;
+    transition: all 0.15s;
+    text-align: left;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--card);
+    color: var(--primary);
+    border-color: #bfdbfe;
+    box-shadow: 0 1px 4px rgba(37,99,235,0.06);
+  }
+  .btn-analyze:hover { background: #dbeafe; transform: translateY(-1px); }
+  .btn-analyze.teal { color: var(--teal); border-color: #99f6e4; }
+  .btn-analyze.teal:hover { background: #ccfbf1; }
+  .btn-analyze.indigo-full {
+    background: var(--indigo);
+    color: #fff;
+    border-color: transparent;
+    justify-content: center;
+    padding: 14px;
+    font-size: 14px;
+  }
+  .btn-analyze.indigo-full:hover { background: #4338ca; }
+  .btn-label { flex: 1; }
+  .btn-sub { font-size: 11px; color: var(--sub-text); font-weight: 400; display: block; }
+
+  /* Demo buttons */
+  .btn-demo {
+    font-size: 11px;
+    color: var(--sub-text);
+    background: var(--sub-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-demo:hover { background: #dbeafe; color: var(--primary); }
+
+  /* Result Section */
+  #result-section { display: none; }
+  #output-content {
+    background: #fafbff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    line-height: 1.8;
+    white-space: pre-wrap;
+    color: var(--text);
+    min-height: 60px;
+  }
+  .result-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .tag-obs { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  .tag-sus { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
+  .tag-res { background: #fefce8; color: #854d0e; border: 1px solid #fde68a; }
+  .tag-norm { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+  .tag-pos { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+
+  /* Copy buttons */
+  .btn-copy {
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 7px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--sub-bg);
+    color: var(--sub-text);
+    transition: all 0.15s;
+  }
+  .btn-copy:hover { background: #dbeafe; color: var(--primary); }
+  .btn-copy.copied { background: #f0fdf4; color: var(--green); border-color: #bbf7d0; }
+
+  /* Modal */
+  #logic-modal {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(15,23,42,0.55);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  #logic-modal.open { display: flex; }
+  .modal-body {
+    background: var(--card);
+    border-radius: 16px;
+    padding: 24px;
+    max-width: 540px;
+    width: 100%;
+    max-height: 82vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--sub-bg); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb { background: #c7d2fe; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+
+  /* Paste flash */
+  @keyframes pasteFlash {
+    0% { border-color: var(--primary); background: #dbeafe; }
+    100% { border-color: var(--border); background: #fafbff; }
+  }
+  .paste-flash { animation: pasteFlash 0.5s ease-out; }
+
+  /* Image preview */
+  #preview-list { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+  #preview-list img { height: 80px; width: auto; border-radius: 8px; border: 1px solid var(--border); flex-shrink: 0; }
+
+  /* Section header */
+  .section-h {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    padding: 4px 10px 4px 0;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .section-h.blue { color: #1d4ed8; }
+  .section-h.teal { color: #0f766e; }
+  .section-h.indigo { color: #4338ca; }
+
+  /* OCR status */
+  #ocr-status { display: none; }
+  #ocr-status.active { display: flex; }
+
+  /* Progress bar */
+  #ocr-bar-wrap { width: 100%; height: 6px; background: #e0e7ff; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  #ocr-bar { height: 6px; background: var(--primary); border-radius: 3px; width: 0%; transition: width 0.3s; }
+</style>
+</head>
+<body>
+
+<div style="max-width:720px; margin:0 auto; padding:20px 16px 48px;">
+
+  <!-- Header -->
+  <header style="margin-bottom:24px; text-align:center; position:relative;">
+    <div style="font-size:28px; margin-bottom:4px;">🫁</div>
+    <h1 style="font-size:22px; font-weight:700; color:var(--primary); margin:0 0 4px;">醫療報告重點擷取助手</h1>
+    <p style="font-size:13px; color:var(--sub-text); margin:0 0 2px;">肺功能 (PFT / IOS / BDT)・胸腔電腦斷層 (Chest CT)</p>
+    <p style="font-size:11px; color:#94a3b8; margin:0;">⚡ 所有運算在瀏覽器本地完成，不上傳伺服器</p>
+    <button onclick="openModal()" style="position:absolute; top:0; right:0; font-size:12px; background:var(--sub-bg); border:1px solid var(--border); color:var(--sub-text); padding:5px 12px; border-radius:8px; cursor:pointer;">
+      ℹ 判讀邏輯
+    </button>
+  </header>
+
+  <!-- Input Card -->
+  <div class="card" style="padding:20px; margin-bottom:16px;">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+      <span style="font-weight:600; font-size:15px;">1. 輸入報告內容</span>
+      <div style="display:flex; gap:8px;">
+        <button class="tab-btn active" id="tab-text" onclick="switchTab('text')">✍ 貼上文字</button>
+        <button class="tab-btn" id="tab-image" onclick="switchTab('image')">🖼 圖片 OCR</button>
+      </div>
+    </div>
+
+    <!-- Text Area -->
+    <div id="input-text-area">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <span style="font-size:12px; color:var(--sub-text);">貼上報告文字 (Ctrl+V)</span>
+        <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+          <span style="font-size:11px; color:var(--sub-text);">範例：</span>
+          <button class="btn-demo" onclick="loadDemo('pft')">PFT</button>
+          <button class="btn-demo" onclick="loadDemo('bdt')">BDT</button>
+          <button class="btn-demo" onclick="loadDemo('ios')">IOS</button>
+          <button class="btn-demo" onclick="loadDemo('ct')">CT</button>
+          <button onclick="clearAll()" style="font-size:12px; color:#94a3b8; background:none; border:none; cursor:pointer; padding:2px 6px;">✕ 清空</button>
+        </div>
+      </div>
+      <textarea id="rawText" placeholder="請在此貼上報告內容…&#10;&#10;例如 PFT：&#10;FVC (8) 3.87 103%&#10;FEV1/FVC  77.25&#10;&#10;例如 CT：&#10;[v] Lung nodule total number ≥4&#10;[v] Emphysema  [ ] Bronchiectasis"></textarea>
+    </div>
+
+    <!-- Image Area -->
+    <div id="input-image-area" style="display:none;">
+      <div class="drop-zone" id="drop-zone">
+        <input type="file" id="imageInput" accept="image/*" multiple>
+        <div style="pointer-events:none;">
+          <div style="font-size:32px; margin-bottom:8px;">📋</div>
+          <p style="font-weight:600; color:var(--text); margin:0 0 4px;">點擊選取圖片 / 拖曳 / 貼上 (Ctrl+V)</p>
+          <p style="font-size:12px; color:var(--sub-text); margin:0;">支援 JPG、PNG、剪貼簿截圖，可多張</p>
+        </div>
+      </div>
+
+      <div id="image-preview-container" style="display:none; margin-top:12px;">
+        <p style="font-size:11px; color:var(--sub-text); margin-bottom:6px;">圖片預覽</p>
+        <div id="preview-list"></div>
+      </div>
+
+      <div id="ocr-status" style="margin-top:12px; flex-direction:column; gap:4px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="spinner"></div>
+          <span id="ocr-progress" style="font-size:13px; color:var(--primary);">初始化 OCR…</span>
+        </div>
+        <div id="ocr-bar-wrap"><div id="ocr-bar"></div></div>
+        <div id="file-counter" style="font-size:11px; color:var(--sub-text); display:none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Analyze Buttons -->
+  <div class="card" style="padding:20px; margin-bottom:16px;">
+    <div style="font-weight:600; font-size:15px; margin-bottom:14px;">2. 選擇分析類型</div>
+
+    <!-- PFT Group -->
+    <div class="action-group blue">
+      <div class="section-h blue">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        肺功能 (Spirometry / PFT)
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;">
+        <button class="btn-analyze" onclick="analyze('flow_volume')">
+          <span>📉</span>
+          <span class="btn-label">流量容積曲線<span class="btn-sub">Pre only</span></span>
+        </button>
+        <button class="btn-analyze" onclick="analyze('bdt')">
+          <span>🌬️</span>
+          <span class="btn-label">支氣管擴張試驗<span class="btn-sub">Pre + Post (BDT)</span></span>
+        </button>
+      </div>
+      <button class="btn-analyze" style="width:100%;" onclick="analyze('full_pft')">
+        <span>☁️</span>
+        <span class="btn-label">完整肺功能<span class="btn-sub">含 TLC、DLCO、KCO</span></span>
+      </button>
+    </div>
+
+    <!-- IOS Group -->
+    <div class="action-group teal">
+      <div class="section-h teal">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+        IOS 震盪肺功能
+      </div>
+      <button class="btn-analyze teal" style="width:100%;" onclick="analyze('ios')">
+        <span>📶</span>
+        <span class="btn-label">IOS 分析<span class="btn-sub">R5、X5、Fres、AX → 周邊阻塞分類</span></span>
+      </button>
+    </div>
+
+    <!-- CT Group -->
+    <div class="action-group indigo" style="margin-bottom:0;">
+      <div class="section-h indigo">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+        影像報告 (Imaging)
+      </div>
+      <button class="btn-analyze indigo-full" onclick="analyze('ct')">
+        🩻 分析電腦斷層 (Chest CT / LDCT)
+      </button>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="card" style="padding:20px;" id="result-section">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <span style="font-weight:600; font-size:15px;">分析結果</span>
+        <span id="result-type-badge" class="result-tag tag-norm" style="font-size:11px;"></span>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="btn-copy" id="copy-btn" onclick="copyResult()">📋 複製</button>
+        <button class="btn-copy" onclick="clearResult()">✕ 關閉</button>
+      </div>
+    </div>
+    <div id="output-content"></div>
+  </div>
+
+  <div style="text-align:right; font-size:11px; color:#cbd5e1; margin-top:16px; font-family:'IBM Plex Mono',monospace;">
+    Ver: 20260517.1 · PFT_CT_Extractor
+  </div>
+</div>
+
+<!-- Logic Modal -->
+<div id="logic-modal">
+  <div class="modal-body">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; border-bottom:1px solid var(--border); padding-bottom:12px;">
+      <h3 style="font-size:17px; font-weight:700; margin:0;">判讀邏輯 Algorithm</h3>
+      <button onclick="closeModal()" style="background:none; border:none; cursor:pointer; color:var(--sub-text); font-size:20px; line-height:1;">✕</button>
+    </div>
+    <div style="font-size:13px; color:var(--sub-text); line-height:1.7; space-y:12px;">
+
+      <div style="margin-bottom:16px;">
+        <div style="font-weight:700; color:#1d4ed8; background:#eff6ff; border-left:3px solid #3b82f6; padding:6px 10px; border-radius:4px; margin-bottom:8px;">1. 肺功能 (PFT / Flow Volume)</div>
+        <ul style="margin:0; padding-left:16px; space-y:4px;">
+          <li><b>Obstructive：</b> Pre <i>或</i> Post FEV1/FVC &lt; 70%</li>
+          <li><b>Suspected Obstructive：</b> 非Obs 且 FEF25-75 %pred &lt; 65%</li>
+          <li><b>Suspected Restrictive：</b> 非上述 且 FVC %pred &lt; 80%</li>
+          <li><b>Normal：</b> 以上皆非</li>
+        </ul>
+      </div>
+
+      <div style="margin-bottom:16px;">
+        <div style="font-weight:700; color:#1d4ed8; background:#eff6ff; border-left:3px solid #3b82f6; padding:6px 10px; border-radius:4px; margin-bottom:8px;">2. 支氣管擴張試驗 (BDT)</div>
+        <ul style="margin:0; padding-left:16px;">
+          <li><b>Positive：</b> Post FEV1 <i>或</i> FVC ↑ &gt;12% <i>且</i> &gt;200ml</li>
+          <li><b>Partial Positive：</b> ↑ &gt;12% <i>或</i> &gt;200ml（符合其一）</li>
+        </ul>
+      </div>
+
+      <div style="margin-bottom:16px;">
+        <div style="font-weight:700; color:#0f766e; background:#f0fdfa; border-left:3px solid #14b8a6; padding:6px 10px; border-radius:4px; margin-bottom:8px;">3. IOS 震盪肺功能</div>
+        <p style="margin:0 0 6px; font-weight:600;">Step 1 Screening（任一符合 → Suspected Peripheral obstruction）</p>
+        <ul style="margin:0 0 8px; padding-left:16px;">
+          <li>R5–R20 &gt; 0.07</li>
+          <li>X5 &lt; −0.12</li>
+          <li>Fres &gt; 14.14</li>
+          <li>AX &gt; 0.44</li>
+        </ul>
+        <p style="margin:0 0 6px; font-weight:600;">Step 2 Classification (ΔX5 = X5pred − X5meas)</p>
+        <ul style="margin:0; padding-left:16px;">
+          <li><b>Normal：</b> R5 &lt;140% &amp; ΔX5 &lt;0.15</li>
+          <li><b>Restriction：</b> R5 &lt;140% &amp; ΔX5 ≥0.15</li>
+          <li><b>Central Obstruction：</b> R5 ≥140% &amp; ΔX5 &lt;0.15</li>
+          <li><b>Peripheral Obstruction：</b> R5 ≥140% &amp; ΔX5 ≥0.15 &amp; R5–R20 ≥0.07</li>
+          <li><b>Probably Central + Restriction：</b> R5 ≥140% &amp; ΔX5 ≥0.15 &amp; R5–R20 &lt;0.07</li>
+        </ul>
+      </div>
+
+      <div>
+        <div style="font-weight:700; color:#4338ca; background:#eef2ff; border-left:3px solid #6366f1; padding:6px 10px; border-radius:4px; margin-bottom:8px;">4. 電腦斷層 (CT / LDCT)</div>
+        <ul style="margin:0; padding-left:16px;">
+          <li><b>結節：</b>抓取 Total Number、各編號詳細、Lung nodules else 肺葉</li>
+          <li><b>智慧合併：</b>&lt;6mm / benign / juxtapleural 概括項目與 #N 詳細項目自動合併</li>
+          <li><b>Other Findings：</b> Emphysema、Bronchiectasis 等合併一行</li>
+          <li><b>順序：</b> Nodules → Assessment (Lung-RADS) → No prior CT → Other Findings</li>
+          <li><b>自動過濾：</b> LDCT Quality 描述、醫師簽名</li>
+          <li><b>相容性：</b> Safari lookbehind 改用標準 regex，支援所有主流瀏覽器</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+//  UTILITIES
+// ============================================================
+const $ = id => document.getElementById(id);
+
+const fmt = n => (n !== null && n !== undefined && !isNaN(n)) ? Math.round(n) : '?';
+const fmtF = (n, d=1) => (n !== null && n !== undefined && !isNaN(n)) ? n.toFixed(d) : '?';
+
+/**
+ * Parse a raw string token as a clinical numeric value.
+ * type: 'volume' → expect L (0.5–12L)
+ *       'ratio'  → expect % (0–100 or 0–1)
+ *       'generic'→ no correction
+ */
+function parseVal(str, type = 'generic') {
+  if (str === null || str === undefined) return null;
+  const s = str.toString().replace(/[^\d.\-]/g, '');
+  let v = parseFloat(s);
+  if (isNaN(v)) return null;
+  if (type === 'volume') {
+    // Values that come in as mL (e.g. 3870 → 3.87)
+    if (v > 20) v /= 1000;
+    else if (v > 8) v /= 10;
+  } else if (type === 'ratio') {
+    // FEV1/FVC can come as 77.25 or 0.7725
+    if (v > 1 && v <= 100) { /* already % */ }
+    else if (v > 0 && v <= 1) v *= 100;
+    else if (v > 100) v /= 10; // e.g. 772 → 77.2
+  }
+  return v;
+}
+
+// ============================================================
+//  TAB SWITCHING
+// ============================================================
+function switchTab(mode) {
+  $('tab-text').classList.toggle('active', mode === 'text');
+  $('tab-image').classList.toggle('active', mode === 'image');
+  $('input-text-area').style.display = mode === 'text' ? 'block' : 'none';
+  $('input-image-area').style.display = mode === 'image' ? 'block' : 'none';
+}
+
+function clearAll() {
+  $('rawText').value = '';
+  $('preview-list').innerHTML = '';
+  $('image-preview-container').style.display = 'none';
+}
+
+function clearResult() {
+  $('result-section').style.display = 'none';
+}
+
+// ============================================================
+//  DEMO DATA
+// ============================================================
+const DEMOS = {
+  pft: `FVC (8) 3.87 3.97 103%
+FEV1 (8) 2.82 2.96 105%
+FEV1/FVC [%] 72.85 75.68 104%
+FEF 25-75% (8) 2.31 2.80 121%
+TLC (8) 6.34 6.21 98%
+RV/TLC [%] 38.5
+DLCO (8) 22.4 22.9 102%
+KCO  5.10 5.20 102%`,
+  bdt: `FVC (8)    Pre: 3.10  82%    Post: 3.45  91%
+FEV1 (8)   Pre: 1.85  62%    Post: 2.15  72%
+FEV1/FVC   Pre: 59.7        Post: 62.3
+FEF 25-75% Pre: 0.98        Post: 1.30`,
+  ios: `R5 (L/s)   0.35   0.42   112%
+R20 (L/s)  0.30   0.32    97%
+X5 (L/s)  -0.08  -0.19   125%
+Fres       8.50  15.20
+AX         0.12   0.52`,
+  ct: `[v] Lung nodule total number v 4
+[v] Lung nodule 1: RUL (SE3/IM24) solid 6mm unchanged
+[v] Lung nodule 2: LUL (SE3/IM58) solid 5mm unchanged
+[ ] Lung nodule 3
+[v] Lung nodules else: [v] RLL [ ] RML [v] LLL (SE4/IM102)
+Lung-RADS Descriptor: Category 2 / S modifier
+[v] Emphysema [v] Bronchiectasis [ ] Tree-in-bud
+[v] Coronary artery calcification (mild)
+[v] Enlarged lymph node: subcarinal (short axis 12mm)
+In comparison with: [v] No prior chest CT available`
+};
+
+function loadDemo(type) {
+  $('rawText').value = DEMOS[type] || '';
+  switchTab('text');
+  $('rawText').classList.add('paste-flash');
+  setTimeout(() => $('rawText').classList.remove('paste-flash'), 600);
+}
+
+// ============================================================
+//  OCR
+// ============================================================
+$('imageInput').addEventListener('change', e => {
+  if (e.target.files.length) processFiles(Array.from(e.target.files));
+});
+
+document.addEventListener('paste', e => {
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  const files = [];
+  for (const item of items) {
+    if (item.type.startsWith('image')) files.push(item.getAsFile());
+  }
+  if (files.length) {
+    e.preventDefault();
+    switchTab('image');
+    const dz = $('drop-zone');
+    dz.classList.add('active');
+    setTimeout(() => dz.classList.remove('active'), 400);
+    processFiles(files);
+  }
+});
+
+// Drag-drop
+const dz = $('drop-zone');
+['dragover','dragenter'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('active'); }));
+['dragleave','dragend'].forEach(ev => dz.addEventListener(ev, () => dz.classList.remove('active')));
+dz.addEventListener('drop', e => {
+  e.preventDefault();
+  dz.classList.remove('active');
+  const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image'));
+  if (files.length) processFiles(files);
+});
+
+async function processFiles(files) {
+  const status = $('ocr-status');
+  const progress = $('ocr-progress');
+  const bar = $('ocr-bar');
+  const counter = $('file-counter');
+  const previewContainer = $('image-preview-container');
+  const previewList = $('preview-list');
+  const textArea = $('rawText');
+
+  status.classList.add('active');
+  bar.style.width = '0%';
+
+  previewContainer.style.display = 'block';
+  for (const file of files) {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const img = document.createElement('img');
+      img.src = ev.target.result;
+      previewList.appendChild(img);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  let worker = null;
+  try {
+    progress.textContent = '初始化 OCR 引擎…';
+    worker = await Tesseract.createWorker('eng+chi_tra', 1, {
+      logger: m => {
+        if (m.status === 'recognizing text') {
+          const p = Math.round(m.progress * 100);
+          progress.textContent = `辨識中 ${p}%`;
+          bar.style.width = p + '%';
+        }
+      }
+    });
+    counter.style.display = 'block';
+    for (let i = 0; i < files.length; i++) {
+      counter.textContent = `圖片 ${i + 1} / ${files.length}`;
+      const ret = await worker.recognize(files[i]);
+      const sep = textArea.value ? '\n\n--- Image ' + (i + 1) + ' ---\n\n' : '';
+      textArea.value += sep + ret.data.text;
+    }
+    progress.textContent = '✓ 辨識完成！';
+    bar.style.width = '100%';
+    setTimeout(() => {
+      switchTab('text');
+      status.classList.remove('active');
+      counter.style.display = 'none';
+    }, 1000);
+  } catch (err) {
+    console.error(err);
+    progress.textContent = '⚠ 辨識錯誤，請重試';
+    progress.style.color = '#dc2626';
+  } finally {
+    if (worker) await worker.terminate();
+  }
+}
+
+// ============================================================
+//  MAIN CONTROLLER
+// ============================================================
+function analyze(type) {
+  const raw = $('rawText').value.trim();
+  if (!raw) { alert('請先輸入文字或上傳圖片！'); return; }
+
+  let result = '';
+  let badgeText = '';
+  let badgeClass = 'tag-norm';
+
+  if (type === 'full_pft')     { result = analyzeFullPFT(raw); badgeText = '完整肺功能'; }
+  else if (type === 'bdt')     { result = analyzeBDT(raw); badgeText = 'BDT'; }
+  else if (type === 'flow_volume') { result = analyzeFlowVolume(raw); badgeText = 'Flow Volume'; }
+  else if (type === 'ios')     { result = analyzeIOS(raw); badgeText = 'IOS'; badgeClass = 'tag-pos'; }
+  else if (type === 'ct')      { result = analyzeCT(raw); badgeText = 'Chest CT'; badgeClass = 'tag-pos'; }
+
+  // Color badge based on content
+  if (/Obstructive ventilatory defect/i.test(result)) badgeClass = 'tag-obs';
+  else if (/Suspected obstructive/i.test(result)) badgeClass = 'tag-sus';
+  else if (/Suspected restrictive/i.test(result)) badgeClass = 'tag-res';
+  else if (/Normal/i.test(result)) badgeClass = 'tag-norm';
+
+  $('result-type-badge').textContent = badgeText;
+  $('result-type-badge').className = 'result-tag ' + badgeClass;
+  $('output-content').textContent = result;
+  $('result-section').style.display = 'block';
+  $('result-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ============================================================
+//  COPY
+// ============================================================
+function copyResult() {
+  const text = $('output-content').textContent;
+  const btn = $('copy-btn');
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = '✓ 已複製';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '📋 複製'; btn.classList.remove('copied'); }, 2000);
+  }).catch(() => {
+    // Fallback
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = '✓ 已複製'; btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '📋 複製'; btn.classList.remove('copied'); }, 2000);
+  });
+}
+
+// ============================================================
+//  MODAL
+// ============================================================
+function openModal() { $('logic-modal').classList.add('open'); }
+function closeModal() { $('logic-modal').classList.remove('open'); }
+$('logic-modal').addEventListener('click', e => { if (e.target === $('logic-modal')) closeModal(); });
+
+// ============================================================
+//  PFT TEXT PARSING HELPERS
+// ============================================================
+
+/**
+ * Find values for a specific PFT parameter from lines.
+ * Returns { predPct } — the %pred value (most reliable single output).
+ * Also returns { measuredVal } if it can determine the measured value.
+ */
+function findPFTParam(lines, keyRegex) {
+  for (const line of lines) {
+    if (!keyRegex.test(line)) continue;
+    const m = line.match(keyRegex);
+    const rest = line.slice(m.index + m[0].length);
+    if (!/\d/.test(rest)) continue;
+
+    // Strategy: find a % token for %pred, and numbers before it for measured
+    const percMatch = rest.match(/(\d+(?:\.\d+)?)\s*%/);
+    if (percMatch) {
+      const predPct = parseFloat(percMatch[1]);
+      const preStr = rest.slice(0, percMatch.index);
+      const nums = preStr.match(/[-\d]+(?:\.\d+)?/g);
+      const measuredRaw = nums && nums.length ? nums[nums.length - 1] : null;
+      return { predPct, measuredRaw };
+    }
+    // No % found: just grab numbers
+    const nums = rest.match(/[-\d]+(?:\.\d+)?/g);
+    if (nums && nums.length >= 2) {
+      return { predPct: parseFloat(nums[1]), measuredRaw: nums[0] };
+    }
+    if (nums && nums.length === 1) {
+      return { predPct: null, measuredRaw: nums[0] };
+    }
+  }
+  return { predPct: null, measuredRaw: null };
+}
+
+/**
+ * Find pre+post values for BDT.
+ * Returns { prePct, preL, postPct, postL }
+ */
+function findBDTParam(lines, keyRegex, volType = false) {
+  for (const line of lines) {
+    if (!keyRegex.test(line)) continue;
+    const m = line.match(keyRegex);
+    const rest = line.slice(m.index + m[0].length);
+    if (!/\d/.test(rest)) continue;
+
+    // Find all number/% tokens
+    const tokens = [...rest.matchAll(/([-\d]+(?:\.\d+)?)\s*(%?)/g)];
+    const percIdxs = tokens.map((t, i) => t[2] === '%' ? i : -1).filter(x => x >= 0);
+
+    if (percIdxs.length >= 2) {
+      const pre_pct_idx = percIdxs[0];
+      const post_pct_idx = percIdxs[1];
+      return {
+        prePct:  parseFloat(tokens[pre_pct_idx][1]),
+        preL:    pre_pct_idx > 0 ? parseFloat(tokens[pre_pct_idx - 1][1]) : null,
+        postPct: parseFloat(tokens[post_pct_idx][1]),
+        postL:   post_pct_idx > pre_pct_idx + 1 ? parseFloat(tokens[pre_pct_idx + 1][1]) : null,
+      };
+    } else if (percIdxs.length === 1) {
+      const pre_pct_idx = percIdxs[0];
+      const allNums = tokens.map(t => parseFloat(t[1]));
+      return {
+        prePct: parseFloat(tokens[pre_pct_idx][1]),
+        preL:   pre_pct_idx > 0 ? allNums[pre_pct_idx - 1] : null,
+        postPct: null,
+        postL:   pre_pct_idx < allNums.length - 1 ? allNums[pre_pct_idx + 1] : null,
+      };
+    } else {
+      // No % at all — try positional (Pred, Pre, Post, PostPct columns)
+      const nums = tokens.map(t => parseFloat(t[1]));
+      if (nums.length >= 4) return { preL: nums[1], prePct: nums[2], postL: nums[3], postPct: nums.length > 4 ? nums[4] : null };
+      if (nums.length >= 2) return { preL: nums[0], prePct: null, postL: nums[1], postPct: null };
+    }
+  }
+  return { prePct: null, preL: null, postPct: null, postL: null };
+}
+
+// ============================================================
+//  1. FULL PFT
+// ============================================================
+function analyzeFullPFT(text) {
+  const lines = text.split('\n');
+  const g = (regex) => findPFTParam(lines, regex);
+
+  const fvc  = g(/^FVC/i);
+  const fev1 = g(/^FEV\s*1(?!\/)/i);
+  const ratio = g(/FEV\s*1\s*[/\\]\s*FVC/i);
+  const fef  = g(/FEF\s*25[-\s]?75|MMEF|MFEF/i);
+  const tlc  = g(/^TLC/i);
+  const rv   = g(/^RV.{0,10}[/%]/i);
+  const dlco = g(/DLCO\b/i);
+  const kco  = g(/KCO|DLCO\/VA/i);
+
+  const p = v => v !== null ? `${v}%` : '?%';
+
+  const parts = [
+    `FVC：${p(fvc.predPct)}`,
+    `FEV1/FVC：${ratio.measuredRaw ? parseVal(ratio.measuredRaw,'ratio').toFixed(1)+'%' : (ratio.predPct ? ratio.predPct+'%' : '?%')}`,
+    `FEF25-75：${p(fef.predPct)}`,
+    `TLC：${p(tlc.predPct)}`,
+    `RV/TLC：${rv.measuredRaw ? parseVal(rv.measuredRaw,'ratio').toFixed(1)+'%' : '?%'}`,
+    `DLCO：${p(dlco.predPct)}`,
+    `KCO：${p(kco.predPct)}`,
+  ];
+
+  return `🫁 完整肺功能 (Full PFT)\n\n${parts.join('、')}`;
+}
+
+// ============================================================
+//  SPIROMETRY CLASSIFICATION (shared logic)
+// ============================================================
+/**
+ * @param {object} d - { fev1fvc (%), fef_pred (%), fvc_pred (%) }
+ * @returns { type, detail }
+ */
+function classifySpirometry(d) {
+  const { fev1fvc, fef_pred, fvc_pred, label } = d;
+  const pfx = label ? `${label} ` : '';
+
+  if (fev1fvc !== null && fev1fvc < 70) {
+    return { type: 'obstructive', text: `Obstructive ventilatory defect\n(${pfx}FEV1/FVC: ${fmtF(fev1fvc)}%)` };
+  }
+  if (fef_pred !== null && fef_pred < 65) {
+    return {
+      type: 'suspected_obs',
+      text: `Suspected obstructive ventilatory impairment\n(${pfx}FEV1/FVC: ${fev1fvc !== null ? fmtF(fev1fvc) : '?'}%, FEF25-75: ${fmtF(fef_pred)}%pred)`
+    };
+  }
+  if (fvc_pred !== null && fvc_pred < 80) {
+    return { type: 'suspected_res', text: `Suspected restrictive ventilatory impairment\n(${pfx}FVC: ${fmtF(fvc_pred)}%pred)` };
+  }
+  return { type: 'normal', text: 'Normal spirometry' };
+}
+
+// ============================================================
+//  2. FLOW VOLUME (pre only)
+// ============================================================
+function analyzeFlowVolume(text) {
+  const lines = text.split('\n');
+  const g = (regex) => findPFTParam(lines, regex);
+
+  const fvc   = g(/^FVC/i);
+  const ratio = g(/FEV\s*1\s*[/\\]\s*FVC/i);
+  const fef   = g(/FEF\s*25[-\s]?75|MMEF|MFEF/i);
+
+  const fev1fvc = ratio.measuredRaw ? parseVal(ratio.measuredRaw, 'ratio') : ratio.predPct;
+  const fef_pred = fef.predPct;
+  const fvc_pred = fvc.predPct;
+
+  const cls = classifySpirometry({ fev1fvc, fef_pred, fvc_pred });
+  return cls.text;
+}
+
+// ============================================================
+//  3. BDT
+// ============================================================
+function analyzeBDT(text) {
+  const lines = text.split('\n');
+  const g = (regex, vol=false) => findBDTParam(lines, regex, vol);
+
+  const fvc   = g(/^FVC/i, true);
+  const fev1  = g(/^FEV\s*1(?!\/)/i, true);
+  const ratio = g(/FEV\s*1\s*[/\\]\s*FVC/i);
+  const fef   = g(/FEF\s*25[-\s]?75|MMEF|MFEF/i);
+
+  // Pre FEV1/FVC
+  const preFEV1FVC = ratio.preL ? parseVal(ratio.preL, 'ratio') : null;
+  const postFEV1FVC = ratio.postL ? parseVal(ratio.postL, 'ratio') : null;
+
+  // Classify pre
+  const preCls = classifySpirometry({
+    fev1fvc: preFEV1FVC,
+    fef_pred: fef.prePct,
+    fvc_pred: fvc.prePct,
+    label: 'pre'
+  });
+  // Classify post
+  const postCls = classifySpirometry({
+    fev1fvc: postFEV1FVC,
+    fef_pred: fef.postPct,
+    fvc_pred: fvc.postPct,
+    label: 'post'
+  });
+
+  // Determine overall classification
+  let diagText = '';
+  if (preCls.type === 'obstructive' || postCls.type === 'obstructive') {
+    // Show most severe
+    const showPost = postFEV1FVC !== null;
+    diagText = `Obstructive ventilatory defect`;
+    if (preFEV1FVC !== null) diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEV1: ${fvc.prePct ? fvc.prePct : '?'}%pred`;
+    if (showPost)            diagText += `\n  post FEV1/FVC: ${fmtF(postFEV1FVC)}%  FEV1: ${fev1.postPct ? fev1.postPct : '?'}%pred`;
+  } else if (preCls.type === 'suspected_obs' || postCls.type === 'suspected_obs') {
+    diagText = `Suspected obstructive ventilatory impairment`;
+    if (preFEV1FVC !== null) diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEF25-75: ${fef.prePct ? fef.prePct : '?'}%pred`;
+    if (postFEV1FVC !== null) diagText += `\n  post FEV1/FVC: ${fmtF(postFEV1FVC)}%  FEF25-75: ${fef.postPct ? fef.postPct : '?'}%pred`;
+  } else if (preCls.type === 'suspected_res' || postCls.type === 'suspected_res') {
+    diagText = `Suspected restrictive ventilatory impairment`;
+    const parts = [];
+    if (fvc.prePct)  parts.push(`pre FVC: ${fvc.prePct}%pred`);
+    if (fvc.postPct) parts.push(`post FVC: ${fvc.postPct}%pred`);
+    if (parts.length) diagText += `\n  (${parts.join(', ')})`;
+  } else {
+    diagText = 'Normal spirometry';
+    if (preFEV1FVC !== null) diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEV1: ${fev1.prePct ? fev1.prePct : '?'}%pred`;
+    if (postFEV1FVC !== null) diagText += `\n  post FEV1/FVC: ${fmtF(postFEV1FVC)}%  FEV1: ${fev1.postPct ? fev1.postPct : '?'}%pred`;
+  }
+
+  // BDT result
+  let bdtLine = '';
+  const calcBDT = (preL, postL) => {
+    if (preL === null || postL === null) return null;
+    // Normalize to litres
+    let p = preL, q = postL;
+    if (p > 20) p /= 1000;
+    if (q > 20) q /= 1000;
+    if (p > 8) p /= 10;
+    if (q > 8) q /= 10;
+    const diffMl = (q - p) * 1000;
+    const diffPct = ((q - p) / p) * 100;
+    return { diffMl, diffPct, sig: diffPct > 12 && diffMl > 200, partial: diffPct > 12 || diffMl > 200 };
+  };
+
+  const fev1BDT = calcBDT(fev1.preL, fev1.postL);
+  const fvcBDT  = calcBDT(fvc.preL, fvc.postL);
+
+  const sigResults = [fev1BDT, fvcBDT].filter(x => x && x.sig);
+  const partialResults = [fev1BDT, fvcBDT].filter(x => x && !x.sig && x.partial);
+
+  if (sigResults.length > 0) {
+    const details = [];
+    if (fev1BDT && fev1BDT.sig) details.push(`FEV1 ↑${fev1BDT.diffPct.toFixed(1)}%, ${fev1BDT.diffMl.toFixed(0)}ml`);
+    if (fvcBDT && fvcBDT.sig)  details.push(`FVC ↑${fvcBDT.diffPct.toFixed(1)}%, ${fvcBDT.diffMl.toFixed(0)}ml`);
+    bdtLine = `\nBronchodilator test: positive\n  (${details.join('; ')})`;
+  } else if (partialResults.length > 0) {
+    const details = [];
+    if (fev1BDT && fev1BDT.partial) details.push(`FEV1 ↑${fev1BDT.diffPct.toFixed(1)}%, ${fev1BDT.diffMl.toFixed(0)}ml`);
+    if (fvcBDT  && fvcBDT.partial)  details.push(`FVC ↑${fvcBDT.diffPct.toFixed(1)}%, ${fvcBDT.diffMl.toFixed(0)}ml`);
+    bdtLine = `\nBronchodilator test: partial positive\n  (${details.join('; ')})`;
+  }
+
+  return diagText + bdtLine;
+}
+
+// ============================================================
+//  4. IOS
+// ============================================================
+function analyzeIOS(text) {
+  const lines = text.split('\n');
+
+  /**
+   * For IOS: param rows typically are:
+   * R5 (L/s)   Pred  Measured  %Pred
+   * We want Measured (col 2) and %Pred (col 3)
+   */
+  const findIOS = (regex) => {
+    for (const line of lines) {
+      if (!regex.test(line)) continue;
+      const m = line.match(regex);
+      const rest = line.slice(m.index + m[0].length);
+      const cleaned = rest.replace(/(\d)\s+\.\s+(\d)/g, '$1.$2');
+      // Extract signed floats
+      const nums = [...cleaned.matchAll(/([-]?\d+(?:\.\d+)?)/g)].map(x => parseFloat(x[1]));
+      if (!nums.length) return {};
+      // Layout: [pred, meas, %pred] or [pred, meas] or [meas] or [meas, %pred]
+      if (nums.length >= 3) return { pred: nums[0], meas: nums[1], pct: nums[2] };
+      if (nums.length === 2) {
+        // Distinguish: if one >20 it's likely %pred
+        if (nums[1] > 20) return { pred: nums[0], meas: null, pct: nums[1] };
+        return { pred: nums[0], meas: nums[1], pct: null };
+      }
+      return { pred: null, meas: nums[0], pct: null };
+    }
+    return {};
+  };
+
+  const r5  = findIOS(/^R5\b/i);
+  const r20 = findIOS(/^R20\b/i);
+  const x5  = findIOS(/^X5\b/i);
+  const fres = findIOS(/^Fres\b/i);
+  const ax   = findIOS(/^AX\b/i);
+
+  const r5_meas  = r5.meas;
+  const r5_pct   = r5.pct;   // %pred
+  const r20_meas = r20.meas;
+  const x5_pred  = x5.pred;
+  const x5_meas  = x5.meas;
+  const fres_meas = fres.meas ?? fres.pred;   // some machines show single value
+  const ax_meas  = ax.meas ?? ax.pred;
+
+  const di520 = (r5_meas !== null && r20_meas !== null) ? r5_meas - r20_meas : null;
+  const deltaX5 = (x5_pred !== null && x5_meas !== null) ? x5_pred - x5_meas : null;
+
+  // Step 1: Screening
+  const flags = [];
+  if (di520 !== null && di520 > 0.07) flags.push(`R5-R20 > 0.07 (${di520.toFixed(2)})`);
+  if (x5_meas !== null && x5_meas < -0.12) flags.push(`X5 < -0.12 (${x5_meas})`);
+  if (fres_meas !== null && fres_meas > 14.14) flags.push(`Fres > 14.14 (${fres_meas})`);
+  if (ax_meas !== null && ax_meas > 0.44) flags.push(`AX > 0.44 (${ax_meas})`);
+
+  let out = '';
+  if (flags.length) {
+    out += flags.join('\n') + '\n→ Suspected Peripheral obstruction\n\n';
+  }
+
+  // Step 2: Classification
+  if (r5_pct !== null && deltaX5 !== null) {
+    let dx = `ΔX5=${deltaX5.toFixed(2)}`;
+    let rp = `R5=${r5_pct}%`;
+    let diagnosis = '';
+
+    if (r5_pct < 140) {
+      diagnosis = deltaX5 < 0.15 ? 'Normal' : 'Restriction';
+    } else {
+      if (deltaX5 < 0.15) {
+        diagnosis = 'Central obstruction';
+      } else {
+        if (di520 !== null) {
+          diagnosis = di520 >= 0.07
+            ? 'Peripheral obstruction'
+            : 'Probably central obstruction + restriction';
+          dx += `, R5-R20=${di520.toFixed(2)}`;
+        } else {
+          diagnosis = 'Obstruction (subtype unknown: R5-R20 unavailable)';
+        }
+      }
+    }
+    out += `Diagnostic Classification: ${diagnosis}\n(${rp}, ${dx})`;
+  } else {
+    out += `(Data insufficient for full classification — need R5%pred and X5 pred+meas)`;
+  }
+
+  return out || '(No IOS parameters detected)';
+}
+
+// ============================================================
+//  5. CT
+// ============================================================
+function analyzeCT(text) {
+  const lines = text.split('\n');
+
+  // ---- Bucket containers ----
+  const nodules = [];
+  const assessment = [];
+  const others = [];
+  let otherLungBuf = [];
+
+  const LUNG_KEYWORDS = ['Emphysema','Bronchiectasis','Bronchitis','Tree-in-bud','Centrilobular','Old pulmonary TB','Interstitial lung disease'];
+  const NODULE_RE = /Lung nodule|Juxtapleural|Nodule with benign|Airway nodule|Atypical pulmonary/i;
+  const ASSESS_RE = /Lung-RADS|Category\s*[0-4X]|Modifier|No prior chest CT/i;
+  const FILTER_RE = /醫師|放診|Reporting\s*Physician/i;
+  const QUALITY_RE = /Quality.*(Good|Acceptable|Not Acceptable)/i;
+
+  /**
+   * Parse checked items from a line.
+   * Handles: [v], [V], [x], [X], ■, ⬛, ✓, √, lone v followed by space
+   * NOTE: Uses replace+split to avoid lookbehind (Safari compat)
+   */
+  function getChecked(line) {
+    // Replace checkmarks with delimiter, then split
+    let t = line
+      .replace(/\[\s*[vVxX]\s*\]/g, '\x00')
+      .replace(/[■⬛✓√]/g, '\x00');
+
+    // Lone 'v'/'V' at start of word boundary — use word-boundary instead of lookbehind
+    // e.g. "v RUL" or "V Emphysema"
+    t = t.replace(/\bv\b/gi, '\x00');
+
+    const parts = t.split('\x00');
+    const results = [];
+    for (let k = 1; k < parts.length; k++) {
+      // Stop at unchecked marker
+      const item = parts[k].replace(/\[\s*\]|□/g, '\x01').split('\x01')[0].trim();
+      if (item) results.push(item);
+    }
+    return results;
+  }
+
+  // ---- Pre-scan: collect #N detail lines (bottom of report) ----
+  const detailMap = {};  // num → text
+  for (const line of lines) {
+    const m = line.trim().match(/^#\s*(\d+)[:.]\s*(.*)/);
+    if (m) detailMap[m[1]] = m[2].trim();
+  }
+  const usedDetails = new Set();
+
+  // ---- Parse Comparison ----
+  for (const line of lines) {
+    if (/In comparison with/i.test(line)) {
+      const checks = getChecked(line);
+      if (checks.some(c => /No prior chest CT/i.test(c))) {
+        assessment.push('No prior chest CT available');
+      }
+    }
+  }
+
+  // ---- Main scan ----
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    i++;
+
+    if (!trimmed) continue;
+    if (FILTER_RE.test(trimmed)) continue;
+    if (QUALITY_RE.test(trimmed)) continue;
+    if (/^\[?\s*impression\s*\]?:?/i.test(trimmed)) continue;
+
+    // Lung-RADS header
+    if (/Lung-RADS.*Descriptor/i.test(trimmed)) {
+      const clean = trimmed.replace(/[\[\]vVxX✓√■⬛]/g, '').replace(/\s+/g, ' ').trim();
+      assessment.push(clean);
+      continue;
+    }
+
+    // Lung nodule N block
+    const noduleHeaderMatch = trimmed.match(/Lung nodule\s+(\d+)\b/i);
+    if (noduleHeaderMatch) {
+      const num = noduleHeaderMatch[1];
+      const noduleData = { size: '', density: '', lobe: '', seIm: '', status: '' };
+      const headerChecks = getChecked(trimmed);
+      const isChecked = headerChecks.length > 0 || /\[/.test(trimmed) === false; // unchecked box means skip
+
+      // Read sub-lines
+      while (i < lines.length) {
+        const nextTrimmed = lines[i].trim();
+        if (!nextTrimmed) { i++; continue; }
+        if (/Lung nodule|Lung nodules else|Airway nodule|Atypical pulmonary cyst|Other.*Findings|Overall|Impression/i.test(nextTrimmed)) break;
+        i++;
+
+        const subChecks = getChecked(nextTrimmed);
+
+        const sizeM = nextTrimmed.match(/Entire Nodule:?\s*([\d.]+)\s*mm/i);
+        if (sizeM) noduleData.size = `${sizeM[1]}mm`;
+
+        const seM = nextTrimmed.match(/\(SE\s*\d+[/,]\s*IM\s*\d+\)/i) || nextTrimmed.match(/\(SE.*?\)/i);
+        if (seM) noduleData.seIm = seM[0];
+
+        subChecks.forEach(val => {
+          if (/solid|ground.?glass|part.?solid|calcif/i.test(val)) noduleData.density = val.replace(/[:;,]+$/, '').trim();
+          if (/RUL|RML|RLL|LUL|LLL/i.test(val)) {
+            noduleData.lobe = val.replace(/[:;,]+$/, '').trim();
+          }
+          if (/unchanged|enlarging|newly|decreased|increased/i.test(val)) noduleData.status = val.replace(/[:;,]+$/, '').trim();
+        });
+      }
+
+      if (!isChecked && headerChecks.length === 0) continue; // skip if no check
+
+      let textToAdd = '';
+      if (detailMap[num]) {
+        let detail = detailMap[num];
+        if (noduleData.status && !detail.toLowerCase().includes(noduleData.status.toLowerCase().slice(0,5))) {
+          detail += ` (${noduleData.status})`;
+        }
+        textToAdd = `Lung nodule ${num}: ${detail}`;
+        usedDetails.add(num);
+      } else {
+        const parts = [];
+        if (noduleData.size) parts.push(noduleData.size);
+        if (noduleData.density) parts.push(noduleData.density);
+        if (noduleData.lobe) parts.push(noduleData.lobe + (noduleData.seIm ? ' ' + noduleData.seIm : ''));
+        else if (noduleData.seIm) parts.push(noduleData.seIm);
+        if (noduleData.status) parts.push(noduleData.status);
+        if (parts.length) textToAdd = `Lung nodule ${num}: ${parts.join(', ')}`;
+      }
+      if (textToAdd) nodules.push(textToAdd);
+      continue;
+    }
+
+    // Lung nodules else
+    if (/Lung nodules else/i.test(trimmed)) {
+      const checks = getChecked(trimmed);
+      if (checks.length) {
+        const lobes = [];
+        checks.forEach(c => {
+          ['RUL','RML','RLL','LUL','LLL'].forEach(l => { if (c.toUpperCase().includes(l)) lobes.push(l); });
+        });
+        const seM = trimmed.match(/\(SE.*?\)/i);
+        const seStr = seM ? ' ' + seM[0] : '';
+        if (lobes.length) nodules.push(`Lung nodules else: ${lobes.join(', ')}${seStr}`);
+      }
+      continue;
+    }
+
+    // Total number
+    if (/Lung nodule.*total number/i.test(trimmed)) {
+      // Find count after check marks
+      const countM = trimmed.match(/total number\b.*?(\d+|>=?\s*\d+)/i);
+      if (countM) {
+        let descRaw = trimmed.split(/total number/i)[0];
+        descRaw = descRaw.replace(/\[.*?\]/g, '').replace(/[vVxX✓√■⬛]/g, '').replace(/\s+/g, ' ').trim();
+        const desc = descRaw || 'Lung nodule(s)';
+        nodules.push(`${desc.replace(/[:;,]+$/,'')}: total number ${countM[1].replace(/\s+/g,'')}`);
+      }
+      continue;
+    }
+
+    // Generic checked items
+    const checks = getChecked(trimmed);
+    for (let c of checks) {
+      c = c.replace(/^[_.\s:]+/, '').replace(/[:;,]+$/, '').trim();
+      if (!c) continue;
+      if (/^(Good|Acceptable|Not Acceptable)$/i.test(c)) continue;
+
+      // Strip "Other:" prefix
+      if (/^Other\s*[:：]/i.test(c)) {
+        c = c.replace(/^Other\s*[:：]\s*/i, '').trim();
+      }
+
+      // Lung findings grouping
+      const lkw = LUNG_KEYWORDS.find(kw => c.toLowerCase().startsWith(kw.toLowerCase()));
+      if (lkw) { otherLungBuf.push(c.replace(/[:;,]+$/,'')); continue; }
+
+      if (ASSESS_RE.test(c)) { assessment.push(c); continue; }
+      if (NODULE_RE.test(c)) { nodules.push(c); continue; }
+
+      others.push(c);
+    }
+  }
+
+  // Merge ungrouped detail lines
+  for (const [num, txt] of Object.entries(detailMap)) {
+    if (!usedDetails.has(num)) nodules.push(`Lung nodule ${num}: ${txt}`);
+  }
+
+  // Merge other lung findings into one line
+  if (otherLungBuf.length) others.unshift(otherLungBuf.join(' / '));
+
+  // ---- Smart Merge: general items ↔ detailed #N items ----
+  const generalNodules = nodules.filter(f => !/^Lung nodule \d+:/i.test(f));
+  let detailedNodules  = nodules.filter(f =>  /^Lung nodule \d+:/i.test(f));
+
+  const merged = [];
+  for (const gen of generalNodules) {
+    const genLower = gen.toLowerCase();
+    // Extract IMs from gen text
+    const genIMs = [...gen.matchAll(/IM[:\s]*(\d+)/gi)].map(m => m[1]);
+
+    let matchIdx = -1;
+    for (let k = 0; k < detailedNodules.length; k++) {
+      const dl = detailedNodules[k].toLowerCase();
+      const detIMs = [...detailedNodules[k].matchAll(/IM[:\s]*(\d+)/gi)].map(m => m[1]);
+
+      if (genIMs.length && detIMs.some(im => genIMs.includes(im))) { matchIdx = k; break; }
+      if (genLower.includes('juxtapleural') && dl.includes('juxtapleural')) { matchIdx = k; break; }
+      if (genLower.includes('benign') && (dl.includes('benign') || dl.includes('calcif'))) { matchIdx = k; break; }
+    }
+
+    if (matchIdx >= 0) {
+      const detail = detailedNodules.splice(matchIdx, 1)[0];
+      const detailCore = detail.replace(/^Lung nodule \d+:\s*/i, '');
+      merged.push(`${gen} — ${detailCore}`);
+    } else {
+      merged.push(gen);
+    }
+  }
+  // Remaining details
+  detailedNodules.forEach(d => merged.push(d));
+
+  // ---- Dedup ----
+  const normalize = s => s.replace(/Lung nodule \d+:\s*/i,'').replace(/[^a-z0-9]/gi,'').toLowerCase();
+  function dedup(arr) {
+    const out = [];
+    for (const item of arr) {
+      const n = normalize(item);
+      let dup = false;
+      for (let k = 0; k < out.length; k++) {
+        const en = normalize(out[k]);
+        if (n === en || n.includes(en) || en.includes(n)) {
+          if (item.length > out[k].length) out[k] = item;
+          dup = true; break;
+        }
+      }
+      if (!dup) out.push(item);
+    }
+    return out;
+  }
+
+  const finalNodules   = dedup(merged);
+  const finalAssess    = dedup(assessment);
+  const finalOthers    = dedup(others);
+
+  // Sort nodules
+  const noduleRank = t => {
+    if (/total number/i.test(t)) return 5;
+    if (/<6mm|less than 6/i.test(t)) return 10;
+    if (/benign|calcif/i.test(t)) return 15;
+    if (/juxtapleural/i.test(t)) return 16;
+    if (/airway nodule/i.test(t)) return 17;
+    if (/cyst/i.test(t)) return 18;
+    const m = t.match(/Lung nodule\s*(\d+)/i);
+    if (m) return 30 + parseInt(m[1]);
+    if (/nodules else/i.test(t)) return 50;
+    return 20;
+  };
+  finalNodules.sort((a, b) => noduleRank(a) - noduleRank(b));
+
+  // Sort assessment: header → Category → Modifier → No prior
+  const assessOrder = t => {
+    if (/Lung-RADS.*Descriptor/i.test(t)) return 0;
+    if (/Category/i.test(t)) return 1;
+    if (/Modifier/i.test(t)) return 2;
+    if (/No prior/i.test(t)) return 3;
+    return 4;
+  };
+  finalAssess.sort((a, b) => assessOrder(a) - assessOrder(b));
+
+  const all = [...finalNodules, ...finalAssess, ...finalOthers];
+  if (!all.length) return '(No structured findings detected — check input format)';
+  return all.map(item => `• ${item}`).join('\n');
+}
+</script>
+</body>
+</html>
