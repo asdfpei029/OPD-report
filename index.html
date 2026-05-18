@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.9 · PFT_CT_Extractor</span>
+  <span>Ver: 20260519.1 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -733,17 +733,20 @@ async function geminiAnalyze(pftType) {
 }
 
 /**
- * Convert Gemini's structured output format into lines our text parser can read.
+ * Convert Gemini's key=value output into lines our text parser can read.
  *
- * Gemini outputs:
- *   FVC [L] Pred=2.07 Pre=1.30 Pre%=63% Post=1.33 Post%=64%
- *   FEV1%FVC [%] Pred=78.79 Pre=63.07 Pre%=80% Post=64.37 Post%=82%
+ * Gemini outputs (actual observed format):
+ *   FVC [L] Pred=3.39 Pre=2.29 Pre%=68% Post=2.45 Post%=72%
+ *   DLCO Pred=7.64 Pre=5.69 Pre%=74%
  *   R5 [L/s] Pred=0.35 Meas=0.42 Pct=112%
  *
- * Our parser expects lines like:
- *   FVC [L] 2.07  1.30  63%  1.33  64%
- *   FEV1%FVC [%] 78.79  63.07  80%  64.37  82%
- *   R5 (L/s)  0.35  0.42  112%
+ * Key insight: "Pre%" is a key name containing %, so standard \w+ regex misses it.
+ * We use a dedicated regex that allows % in key names.
+ *
+ * Output format that findPFTParam can parse:
+ *   FVC [L]  3.39  2.29  68%  2.45  72%
+ *   DLCO  7.64  5.69  74%
+ *   R5 [L/s]  0.35  0.42  112%
  */
 function convertGeminiToParserFormat(text) {
   const lines = text.split('\n');
@@ -753,37 +756,41 @@ function convertGeminiToParserFormat(text) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('【')) continue;
 
+    // Check if line has key=value pairs
+    if (!/\w+%?\s*=/.test(trimmed)) { out.push(trimmed); continue; }
+
     // Extract parameter name (everything before first key=value)
-    const nameMatch = trimmed.match(/^([A-Za-z0-9%\/\s\[\]\.]+?)\s+(?=\w+=)/);
+    const nameMatch = trimmed.match(/^([A-Za-z0-9%\/\s\[\]\.\-]+?)\s+(?=[A-Za-z]+=)/);
     const paramName = nameMatch ? nameMatch[1].trim() : '';
     if (!paramName) { out.push(trimmed); continue; }
 
-    // Extract key=value pairs
+    // Extract key=value pairs — allow % in key names (e.g. Pre%, Post%)
+    // Regex: key can contain word chars + optional %, value is number + optional %
     const pairs = {};
-    const kvRegex = /(\w+)\s*=\s*([-\d.]+%?)/g;
+    const kvRegex = /([\w]+%?)\s*=\s*([-\d.]+\s*%?)/g;
     let m;
     while ((m = kvRegex.exec(trimmed)) !== null) {
-      pairs[m[1].toLowerCase()] = m[2];
+      const key = m[1].toLowerCase();           // e.g. "pre%", "post%", "pred", "meas"
+      const val = m[2].trim();                  // e.g. "68%", "2.29", "74%"
+      pairs[key] = val;
     }
 
     // Build parser-friendly line
-    // For PFT: Pred  Pre  Pre%  Post  Post%
-    // For IOS: Pred  Meas  Pct
-    if (pairs.meas !== undefined) {
-      // IOS format
+    if (pairs['meas'] !== undefined || pairs['best'] !== undefined) {
+      // IOS format: Pred  Meas  Pct
       const parts = [paramName];
-      if (pairs.pred) parts.push(pairs.pred);
-      if (pairs.meas) parts.push(pairs.meas);
-      if (pairs.pct)  parts.push(pairs.pct);
+      if (pairs['pred']) parts.push(pairs['pred']);
+      if (pairs['meas'] ?? pairs['best']) parts.push(pairs['meas'] ?? pairs['best']);
+      if (pairs['pct'])  parts.push(pairs['pct']);
       out.push(parts.join('  '));
     } else {
-      // PFT format
+      // PFT format: Pred  Pre  Pre%  Post  Post%
       const parts = [paramName];
-      if (pairs.pred) parts.push(pairs.pred);
-      if (pairs.pre)  parts.push(pairs.pre);
-      if (pairs['pre%']) parts.push(pairs['pre%']);
-      if (pairs.post) parts.push(pairs.post);
-      if (pairs['post%']) parts.push(pairs['post%']);
+      if (pairs['pred'])   parts.push(pairs['pred']);
+      if (pairs['pre'])    parts.push(pairs['pre']);
+      if (pairs['pre%'])   parts.push(pairs['pre%']);   // ← key fix: allow % in key
+      if (pairs['post'])   parts.push(pairs['post']);
+      if (pairs['post%'])  parts.push(pairs['post%']);  // ← key fix
       out.push(parts.join('  '));
     }
   }
