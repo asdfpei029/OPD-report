@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.12 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.13 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -715,7 +715,12 @@ async function geminiAnalyze(pftType) {
 
     // Auto-detect BDT vs Flow Volume based on extracted data
     if (pftType === 'flow_volume' || pftType === 'bdt') {
-      pftType = /Post%?=/.test(parsable) ? 'bdt' : 'flow_volume';
+      const hasBDT = parsable.split('\n').some(line => {
+        if (!/^FVC|^FEV\s*1(?![\/%])/i.test(line.trim())) return false;
+        const pcts = line.match(/\d+\s*%/g);
+        return pcts && pcts.length >= 2;
+      });
+      pftType = hasBDT ? 'bdt' : 'flow_volume';
     }
 
     // Run our own text-parsing logic (same as manual text input)
@@ -885,11 +890,16 @@ function analyze(type) {
   const raw = $('rawText').value.trim();
   if (!raw) { alert('請先輸入文字！'); return; }
 
-  // Smart auto-detect: if user presses flow_volume but Post data exists → use BDT
-  // If user presses bdt but no Post data → use flow_volume
+  // Smart auto-detect: BDT vs Flow Volume
+  // Strategy: look at FVC or FEV1 line — if it has ≥2 % tokens, there's a Post column
+  // This handles cases where column header says "PostTrial2..." (no standalone "Post" word)
   if (type === 'flow_volume' || type === 'bdt') {
-    const hasPost = /\bPost\s*[:=\s]\s*[\d.]/.test(raw) || /\bPost\b/.test(raw);
-    type = hasPost ? 'bdt' : 'flow_volume';
+    const hasBDT = raw.split('\n').some(line => {
+      if (!/^FVC|^FEV\s*1(?![\/%])/i.test(line.trim())) return false;
+      const pcts = line.match(/\d+\s*%/g);
+      return pcts && pcts.length >= 2;  // Pre% + Post% = at least 2 % tokens
+    });
+    type = hasBDT ? 'bdt' : 'flow_volume';
   }
 
   const map = {
