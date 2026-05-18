@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.13 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.15 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -635,11 +635,20 @@ FRC [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
 DLCO Pred=X Pre=X Pre%=X%
 KCO Pred=X Pre=X Pre%=X%
 MVV [L/min] Pred=X Pre=X Pre%=X%
-R5 [L/s] Pred=X Meas=X Pct=X%
-R20 [L/s] Pred=X Meas=X Pct=X%
-X5 [L/s] Pred=X Meas=X
+R5 [L/s] Pred=X Meas=X Pct=X
+R20 [L/s] Pred=X Meas=X Pct=X
+Di5-20 [L/s] Meas=X
+X5 [L/s] Pred=X Meas=X Pct=X
 Fres Meas=X
 AX Meas=X
+
+IOS COLUMN RULES (critical):
+- IOS table columns are: Parameter | Unit | Pred | Best | %(B/P) | Z-Score
+- "Best" = measured value → output as Meas=
+- "%(B/P)" = percentage of predicted → output as Pct= (integer, no % sign needed)
+- For X5: Pred is typically negative (e.g. -0.01), Meas is also negative (e.g. -0.44)
+- Di5-20 usually has no Pred, only Meas
+- Fres and AX usually have no Pred, only Meas (Best column)
 
 RULES:
 - Output ONLY rows for parameters visible in the image.
@@ -791,33 +800,53 @@ function convertGeminiToParserFormat(text) {
     const paramName = nameMatch ? nameMatch[1].trim() : '';
     if (!paramName) { out.push(trimmed); continue; }
 
-    // Extract key=value pairs — allow % in key names (e.g. Pre%, Post%)
-    // Regex: key can contain word chars + optional %, value is number + optional %
+    // Extract key=value pairs — allow % and / and ( ) in key names for %(B/P)
+    // Gemini uses: Best=, %(B/P)=, Pred=, Meas=, Pct=
     const pairs = {};
+    // First pass: handle %(B/P)= specially
+    const bpMatch = trimmed.match(/\%\s*\([Bb][\/][Pp]\)\s*=\s*([-\d.]+)/);
+    if (bpMatch) pairs['pct'] = bpMatch[1];
+
     const kvRegex = /([\w]+%?)\s*=\s*([-\d.]+\s*%?)/g;
     let m;
     while ((m = kvRegex.exec(trimmed)) !== null) {
-      const key = m[1].toLowerCase();           // e.g. "pre%", "post%", "pred", "meas"
-      const val = m[2].trim();                  // e.g. "68%", "2.29", "74%"
-      pairs[key] = val;
+      const key = m[1].toLowerCase();
+      const val = m[2].trim();
+      // Map Gemini key names to standard names
+      if (key === 'best') pairs['meas'] = val;
+      else if (key === 'pred') pairs['pred'] = val;
+      else if (key === 'meas') pairs['meas'] = val;
+      else if (key === 'pct')  pairs['pct']  = val;
+      else if (key === 'pre')  pairs['pre']  = val;
+      else if (key === 'post') pairs['post'] = val;
+      else pairs[key] = val;
     }
 
     // Build parser-friendly line
     if (pairs['meas'] !== undefined || pairs['best'] !== undefined) {
       // IOS format: Pred  Meas  Pct
+      // findIOS expects: [pred, meas, pct] where pct > 20 (integer, no % needed)
       const parts = [paramName];
-      if (pairs['pred']) parts.push(pairs['pred']);
-      if (pairs['meas'] ?? pairs['best']) parts.push(pairs['meas'] ?? pairs['best']);
-      if (pairs['pct'])  parts.push(pairs['pct']);
+      const predVal = pairs['pred'];
+      const measVal = pairs['meas'] ?? pairs['best'];
+      const pctVal  = pairs['pct'];
+      if (predVal) parts.push(predVal);
+      if (measVal) parts.push(measVal);
+      // Pct: strip % if present, keep as bare number (findIOS checks > 20)
+      if (pctVal)  parts.push(pctVal.replace('%','').trim());
       out.push(parts.join('  '));
     } else {
       // PFT format: Pred  Pre  Pre%  Post  Post%
       const parts = [paramName];
       if (pairs['pred'])   parts.push(pairs['pred']);
       if (pairs['pre'])    parts.push(pairs['pre']);
-      if (pairs['pre%'])   parts.push(pairs['pre%']);   // ← key fix: allow % in key
+      // Pre% key: kvRegex captures 'pre' from 'Pre%=68%' because % is in value
+      // But our first-pass regex handles %(B/P), so pre% key comes from [\w]+%? match
+      const prePct = pairs['pre%'] ?? pairs['prepct'];
+      if (prePct)          parts.push(prePct.replace('%','').trim() + '%');
       if (pairs['post'])   parts.push(pairs['post']);
-      if (pairs['post%'])  parts.push(pairs['post%']);  // ← key fix
+      const postPct = pairs['post%'] ?? pairs['postpct'];
+      if (postPct)         parts.push(postPct.replace('%','').trim() + '%');
       out.push(parts.join('  '));
     }
   }
@@ -1270,6 +1299,7 @@ function analyzeIOS(text) {
       if (!regex.test(line)) continue;
       const m = line.match(regex);
       const rest = line.slice(m.index + m[0].length)
+        .replace(/\[.*?\]/g, '')                      // strip unit brackets like [L/s]
         .replace(/(\d)\s+\.\s+(\d)/g, '$1.$2')
         .replace(/kPa\s*\/\s*\(L\/s\)/gi, '')
         .replace(/kPa\/L/gi, '').replace(/\b1\/s\b/gi, '');
@@ -1321,7 +1351,7 @@ function analyzeIOS(text) {
   const r5   = findIOS(/^R5/i);
   const r20  = findIOS(/^R20/i);
   const x5   = findIOS(/^X5/i);
-  const fres = findIOS(/^Fres/i);
+  const fres = findIOS(/^Fres|^Frc\b/i);   // also match 'Frc' (Gemini OCR error)
   const ax   = findIOS(/^AX\b/i);
 
   const r5_meas  = r5.meas;
