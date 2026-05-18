@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.8 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.9 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -909,23 +909,63 @@ $('logic-modal').addEventListener('click',e=>{ if(e.target===$('logic-modal')) c
 // ============================================================
 // PFT PARSING HELPERS
 // ============================================================
+/**
+ * Find %pred and measured value for a PFT parameter.
+ *
+ * Handles all column layouts:
+ * A: Pred  Pre  Pre%Pred  Post  Post%Pred         → first % = Pre%Pred
+ * B: Pred  Pre  Pre%Pred  Post  T1 T2 T3  %Pred   → first % = Pre%Pred
+ * C: Pred  Pre  %Pred  Z-Score  Trial1             → only one % = %Pred (=Pre%Pred)
+ * D: Pre%=68%  (Gemini structured)                 → key=value format
+ *
+ * %pred is ALWAYS a percentage: valid range 10–300%.
+ * measuredRaw is the number immediately BEFORE the first % token.
+ */
 function findPFTParam(lines, keyRegex) {
   for (const line of lines) {
     if (!keyRegex.test(line)) continue;
     const m = line.match(keyRegex);
-    const rest = line.slice(m.index+m[0].length);
+    const rest = line.slice(m.index + m[0].length);
     if (!/\d/.test(rest)) continue;
-    const percM = rest.match(/(\d+(?:\.\d+)?)\s*%/);
-    if (percM) {
-      const predPct = parseFloat(percM[1]);
-      const pre = rest.slice(0,percM.index).match(/[-\d]+(?:\.\d+)?/g);
-      return { predPct, measuredRaw: pre&&pre.length ? pre[pre.length-1] : null };
+
+    // --- Gemini key=value format ---
+    // e.g. "Pred=3.39 Pre=2.29 Pre%=68% Post=2.45 Post%=72%"
+    if (/\w%?\s*=/.test(rest)) {
+      const pairs = {};
+      for (const [,k,v] of rest.matchAll(/(\w+%?)\s*=\s*([-\d.]+%?)/g)) {
+        pairs[k.toLowerCase().replace('%','pct')] = v.replace('%','');
+      }
+      const predPct = pairs['prepct'] ?? pairs['pct'] ?? null;
+      const meas    = pairs['pre']    ?? null;
+      return {
+        predPct:     predPct ? parseFloat(predPct) : null,
+        measuredRaw: meas
+      };
     }
+
+    // --- Standard: find ALL % tokens, pick the right one ---
+    const percMatches = [...rest.matchAll(/(\d+(?:\.\d+)?)\s*%/g)];
+    if (percMatches.length > 0) {
+      // Find the FIRST % value that is a valid %pred (10–300)
+      // This skips Z-Score-like values and locks onto Pre%Pred
+      for (const pm of percMatches) {
+        const pct = parseFloat(pm[1]);
+        if (pct >= 10 && pct <= 300) {
+          // measuredRaw = last number before this % match
+          const before = rest.slice(0, pm.index);
+          const nums   = before.match(/[-\d]+(?:\.\d+)?/g);
+          const meas   = nums && nums.length ? nums[nums.length - 1] : null;
+          return { predPct: pct, measuredRaw: meas };
+        }
+      }
+    }
+
+    // --- No % found: positional ---
     const nums = rest.match(/[-\d]+(?:\.\d+)?/g);
-    if (nums&&nums.length>=2) return { predPct:parseFloat(nums[1]), measuredRaw:nums[0] };
-    if (nums&&nums.length===1) return { predPct:null, measuredRaw:nums[0] };
+    if (nums && nums.length >= 2) return { predPct: parseFloat(nums[1]), measuredRaw: nums[0] };
+    if (nums && nums.length === 1) return { predPct: null, measuredRaw: nums[0] };
   }
-  return { predPct:null, measuredRaw:null };
+  return { predPct: null, measuredRaw: null };
 }
 
 /**
