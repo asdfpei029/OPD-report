@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260519.1 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.11 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -602,23 +602,36 @@ function renderPreviews() {
 // Universal extraction prompt — same structure for all PFT types
 const GEMINI_EXTRACT_PROMPT = `You are a medical data extractor. This image contains a pulmonary function test (PFT) report table.
 
-YOUR ONLY JOB: Read the numbers from the table and output them in the exact format below. Do NOT interpret, classify, or diagnose anything.
+YOUR ONLY JOB: Read the numbers and output them in the exact key=value format below. Do NOT interpret, classify, or diagnose.
 
-CRITICAL COLUMN RULES:
-- The table may have columns: Pred / Pre / Pre%Pred / Post / Trial1 / Trial2 / Trial3 / %Pred / %Change
-- "Post" is the column IMMEDIATELY after "Pre%Pred". It is NOT a Trial column.
-- Trial columns (Trial1, Trial2, Trial3) come AFTER Post. IGNORE Trial values.
-- "%Pred" near the end refers to Post%Pred.
-- "%Change" is the last column. IGNORE it.
-- FEV1%FVC row: the "Pre" value is the actual measured FEV1/FVC ratio (e.g. 63.07), NOT a %pred.
+COLUMN IDENTIFICATION RULES (critical):
+The table has one of these layouts — identify which one applies:
 
-OUTPUT FORMAT (one parameter per line, use exact parameter names):
+Layout A (with Trial columns):
+  Pred | Pre | Pre%Pred | Post | Trial2 | Trial3 | Trial4 | %Pred | %Change
+  → Post% = the "%Pred" column near the end (second-to-last %)
+  → IGNORE Trial2/3/4 values entirely
+
+Layout B (with Z-Score, no Trial):
+  Pred | Pre | Pre%Pred | Post | %Pred | Z-Score | %Change
+  → Post% = the "%Pred" column (comes right after Post)
+
+Layout C (Pre only, no Post):
+  Pred | Pre | %Pred | Z-Score | Trial1
+  → No Post column exists; omit Post= and Post%= fields
+
+For FEV1%FVC row: "Pre" value is the actual ratio (e.g. 62.19), not a percentage.
+For RV%TLC row: "Pre" value is the actual ratio (e.g. 59.86), not a percentage.
+
+OUTPUT FORMAT (one parameter per line):
 FVC [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
 FEV1 [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
 FEV1%FVC [%] Pred=X Pre=X Pre%=X% Post=X Post%=X%
 FEF25-75 [L/s] Pred=X Pre=X Pre%=X% Post=X Post%=X%
-TLC [L] Pred=X Pre=X Pre%=X%
-RV/TLC [%] Pre=X Pre%=X%
+TLC [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
+RV [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
+RV%TLC [%] Pred=X Pre=X Pre%=X% Post=X Post%=X%
+FRC [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
 DLCO Pred=X Pre=X Pre%=X%
 KCO Pred=X Pre=X Pre%=X%
 MVV [L/min] Pred=X Pre=X Pre%=X%
@@ -629,14 +642,18 @@ Fres Meas=X
 AX Meas=X
 
 RULES:
-- Only output rows for parameters that actually appear in the image.
-- If a value is missing/not shown, omit that field (don't write N/A).
-- Output ONLY the data lines above. No explanation, no diagnosis, no extra text.`;
+- Output ONLY rows for parameters visible in the image.
+- If Post column does not exist, omit Post= and Post%=.
+- If a value is missing/blank, omit that field entirely.
+- Output ONLY the data lines. No explanation, no diagnosis, no extra text.
+- Multiple images: extract ALL parameters from ALL images, combine into one output.`;
 
 async function geminiAnalyze(pftType) {
   const key = localStorage.getItem('gemini_key')||'';
   if (!key) { alert('請先填入 Gemini API Key！'); return; }
   if (!pendingImages.length) { alert('請先貼上或上傳報告圖片！'); return; }
+  // Note: BDT vs Flow Volume auto-detect happens AFTER Gemini extraction
+  // based on whether Post= fields appear in the output
 
   const gStatus   = $('gemini-status');
   const gProgress = $('gemini-progress');
@@ -695,6 +712,11 @@ async function geminiAnalyze(pftType) {
 
     // Convert Gemini's structured output to the format our text parser understands
     const parsable = convertGeminiToParserFormat(extractedText);
+
+    // Auto-detect BDT vs Flow Volume based on extracted data
+    if (pftType === 'flow_volume' || pftType === 'bdt') {
+      pftType = /Post%?=/.test(parsable) ? 'bdt' : 'flow_volume';
+    }
 
     // Run our own text-parsing logic (same as manual text input)
     gBar.style.width = '95%';
@@ -862,6 +884,14 @@ async function processFiles(files) {
 function analyze(type) {
   const raw = $('rawText').value.trim();
   if (!raw) { alert('請先輸入文字！'); return; }
+
+  // Smart auto-detect: if user presses flow_volume but Post data exists → use BDT
+  // If user presses bdt but no Post data → use flow_volume
+  if (type === 'flow_volume' || type === 'bdt') {
+    const hasPost = /\bPost\s*[:=\s]\s*[\d.]/.test(raw) || /\bPost\b/.test(raw);
+    type = hasPost ? 'bdt' : 'flow_volume';
+  }
+
   const map = {
     full_pft:    [analyzeFullPFT,   '完整肺功能',  'tag-norm'],
     bdt:         [analyzeBDT,       'BDT',         'tag-norm'],
@@ -1370,15 +1400,26 @@ function analyzeCT(text) {
   const QUALITY_RE=/Quality.*(Good|Acceptable|Not Acceptable)/i;
 
   // Safari-safe check parser (no lookbehind)
+  // Returns only content from CHECKED items (■, [v], [x], ✓, √)
+  // Unchecked □ items are completely ignored
   function getChecked(line) {
+    // First: if line has NO checked marker at all → skip entirely
+    const hasCheck = /\[\s*[vVxX]\s*\]|[■⬛✓√]|\bv\b/i.test(line);
+    if (!hasCheck) return [];
+
     let t = line
-      .replace(/\[\s*[vVxX]\s*\]/g,'\x00')
-      .replace(/[■⬛✓√]/g,'\x00')
-      .replace(/\bv\b/gi,'\x00');
-    const parts=t.split('\x00');
-    const results=[];
-    for (let k=1;k<parts.length;k++) {
-      const item=parts[k].replace(/\[\s*\]|□/g,'\x01').split('\x01')[0].trim();
+      .replace(/\[\s*[vVxX]\s*\]/g, '\x00')  // [v] → delimiter
+      .replace(/[■⬛✓√]/g, '\x00')            // ■ → delimiter
+      .replace(/\bv\b/gi, '\x00');             // lone v → delimiter
+
+    const parts = t.split('\x00');
+    const results = [];
+    for (let k = 1; k < parts.length; k++) {
+      // Stop at first unchecked □ within this segment
+      const item = parts[k]
+        .replace(/\[\s*\]|□/g, '\x01')
+        .split('\x01')[0]
+        .trim();
       if (item) results.push(item);
     }
     return results;
@@ -1472,12 +1513,15 @@ function analyzeCT(text) {
       continue;
     }
 
-    // Total number
+    // Total number — only process if line has a checked marker
     if (/Lung nodule.*total number/i.test(trimmed)) {
-      const cM=trimmed.match(/total number\b.*?(\d+|>=?\s*\d+)/i);
-      if (cM) {
-        let desc=trimmed.split(/total number/i)[0].replace(/\[.*?\]/g,'').replace(/[vVxX✓√■⬛]/g,'').replace(/\s+/g,' ').trim().replace(/[:;,]+$/,'');
-        nodules.push(`${desc||'Lung nodule(s)'}: total number ${cM[1].replace(/\s+/g,'')}`);
+      const hasChecked = /\[\s*[vVxX]\s*\]|[■⬛✓√]|\bv\s+\d/i.test(trimmed);
+      if (hasChecked) {
+        const cM=trimmed.match(/total number\b.*?(\d+|>=?\s*\d+)/i);
+        if (cM) {
+          let desc=trimmed.split(/total number/i)[0].replace(/\[.*?\]/g,'').replace(/[vVxX✓√■⬛]/g,'').replace(/\s+/g,' ').trim().replace(/[:;,]+$/,'');
+          nodules.push(`${desc||'Lung nodule(s)'}: total number ${cM[1].replace(/\s+/g,'')}`);
+        }
       }
       continue;
     }
