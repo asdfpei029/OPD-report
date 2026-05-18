@@ -191,7 +191,7 @@ textarea:focus{border-color:var(--primary);}
       <div style="pointer-events:none;">
         <div style="font-size:30px;margin-bottom:8px;">📋</div>
         <p style="font-weight:600;color:var(--text);font-size:14px;margin-bottom:4px;">點擊選取 / 拖曳 / Ctrl+V 貼上截圖</p>
-        <p style="font-size:12px;color:var(--sub-text);">支援 JPG、PNG、剪貼簿截圖</p>
+        <p style="font-size:12px;color:var(--sub-text);">支援 JPG、PNG、剪貼簿截圖｜可同時上傳多張（如 PFT + DLCO）</p>
         <div style="margin-top:10px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
           <span style="font-size:11px;background:#faf5ff;color:var(--purple);border:1px solid #e9d5ff;border-radius:5px;padding:2px 9px;">✨ 有 API Key → Gemini Vision 直接分析</span>
           <span style="font-size:11px;background:var(--sub-bg);color:var(--sub-text);border:1px solid var(--border);border-radius:5px;padding:2px 9px;">無 Key → Tesseract OCR</span>
@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.6 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.7 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -627,13 +627,23 @@ async function geminiAnalyze(pftType) {
     const mime = file.type || 'image/png';
 
     gBar.style.width = '40%';
-    gProgress.textContent = 'Gemini 讀取表格數字中…';
+    gProgress.textContent = `Gemini 讀取${pendingImages.length > 1 ? pendingImages.length+'張圖' : '表格數字'}中…`;
+
+    // Build parts — support multiple images (e.g. PFT + DLCO on separate pages)
+    const imageParts = [];
+    for (const img of pendingImages) {
+      const imgB64 = await fileToBase64(img);
+      imageParts.push({ inline_data: { mime_type: img.type || 'image/png', data: imgB64 } });
+    }
 
     const body = {
       contents: [{
         parts: [
-          { inline_data: { mime_type: mime, data: b64 } },
-          { text: GEMINI_EXTRACT_PROMPT }
+          ...imageParts,
+          { text: pendingImages.length > 1
+              ? GEMINI_EXTRACT_PROMPT + '\n\nNote: Multiple images are provided. Extract ALL parameters from ALL images and combine into one output.'
+              : GEMINI_EXTRACT_PROMPT
+          }
         ]
       }]
     };
@@ -1037,22 +1047,29 @@ function analyzeBDT(text) {
   const lines = text.split('\n');
   const g = r => findBDTParam(lines,r);
   const fvc  = g(/^FVC/i);
-  const fev1 = g(/^FEV\s*1(?!\/)/i);
-  const ratio = g(/FEV\s*1\s*[/\\%]\s*FVC/i);
+  const fev1 = g(/^FEV\s*1(?![\/%])/i);
+  const ratio = g(/FEV\s*1\s*[\/\\%]\s*FVC/i);
   const fef  = g(/FEF\s*25[-\s]?75|MMEF|MFEF/i);
 
   const preFEV1FVC  = ratio.preL  ? parseVal(ratio.preL,'ratio')  : null;
   const postFEV1FVC = ratio.postL ? parseVal(ratio.postL,'ratio') : null;
+
+  // FEV1 %pred: use postPct for post (the %Pred col near end), prePct for pre
+  // postPct is the second-to-last % token (last = %Change), prePct is first %
+  const fev1PrePct  = fev1.prePct;   // Pre%Pred col
+  const fev1PostPct = fev1.postPct;  // Post%Pred col (near end of row)
 
   const preCls  = classifySpiro({ fev1fvc:preFEV1FVC,  fef_pred:fef.prePct,  fvc_pred:fvc.prePct,  label:'pre' });
   const postCls = classifySpiro({ fev1fvc:postFEV1FVC, fef_pred:fef.postPct, fvc_pred:fvc.postPct, label:'post' });
 
   let diagText = '';
   const types = [preCls.type, postCls.type];
+  const showFEV1pct = (pct) => pct ? `${pct}%pred` : '?%pred';
+
   if (types.includes('obs')) {
     diagText = `Obstructive ventilatory defect`;
-    if (preFEV1FVC!=null)  diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEV1: ${fev1.prePct||'?'}%pred`;
-    if (postFEV1FVC!=null) diagText += `\n  post FEV1/FVC: ${fmtF(postFEV1FVC)}%  FEV1: ${fev1.postPct||'?'}%pred`;
+    if (preFEV1FVC!=null)  diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEV1: ${showFEV1pct(fev1PrePct)}`;
+    if (postFEV1FVC!=null) diagText += `\n  post FEV1/FVC: ${fmtF(postFEV1FVC)}%  FEV1: ${showFEV1pct(fev1PostPct)}`;
   } else if (types.includes('sus_obs')) {
     diagText = `Suspected obstructive ventilatory impairment`;
     if (preFEV1FVC!=null)  diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEF25-75: ${fef.prePct||'?'}%pred`;
@@ -1065,8 +1082,8 @@ function analyzeBDT(text) {
     if (parts.length) diagText += `\n  (${parts.join(', ')})`;
   } else {
     diagText = `Normal spirometry`;
-    if (preFEV1FVC!=null)  diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEV1: ${fev1.prePct||'?'}%pred`;
-    if (postFEV1FVC!=null) diagText += `\n  post FEV1/FVC: ${fmtF(postFEV1FVC)}%  FEV1: ${fev1.postPct||'?'}%pred`;
+    if (preFEV1FVC!=null)  diagText += `\n  pre  FEV1/FVC: ${fmtF(preFEV1FVC)}%  FEV1: ${showFEV1pct(fev1PrePct)}`;
+    if (postFEV1FVC!=null) diagText += `\n  post FEV1/FVC: ${fmtF(postFEV1FVC)}%  FEV1: ${showFEV1pct(fev1PostPct)}`;
   }
 
   // BDT positive check
@@ -1081,13 +1098,16 @@ function analyzeBDT(text) {
   const fev1r = calcBDT(fev1.preL, fev1.postL);
   const fvcr  = calcBDT(fvc.preL,  fvc.postL);
 
-  const isSig = [fev1r,fvcr].some(x=>x&&x.sig);
+  const isSig     = [fev1r,fvcr].some(x=>x&&x.sig);
   const isPartial = !isSig && [fev1r,fvcr].some(x=>x&&x.partial);
   let bdtLine='';
   const detail = (n,r) => r&&r.partial ? `${n} ↑${r.dPct.toFixed(1)}%, ${r.dMl.toFixed(0)}ml` : null;
   if (isSig||isPartial) {
     const parts=[detail('FEV1',fev1r),detail('FVC',fvcr)].filter(Boolean);
     bdtLine=`\nBronchodilator test: ${isSig?'positive':'partial positive'}\n  (${parts.join('; ')})`;
+  } else if (fev1r||fvcr) {
+    // Explicitly state negative
+    bdtLine=`\nBronchodilator test: negative`;
   }
   return diagText+bdtLine;
 }
@@ -1097,57 +1117,122 @@ function analyzeBDT(text) {
 // ============================================================
 function analyzeIOS(text) {
   const lines = text.split('\n');
-  const findIOS = regex => {
+
+  /**
+   * IOS parameter finder — handles multiple formats:
+   * Format A (standard):  "R5 (L/s)   0.40  0.42  112%"
+   * Format B (no space):  "R5HzkPa/(L/s)  0.40  0.42  105"  ← %(B/P) no % sign
+   * Format C (Gemini):    "R5 [L/s] Pred=0.40 Meas=0.42 Pct=112%"
+   * Format D (OCR text):  "R5Hz kPa/(L/s)  0.40   0.42   105"
+   *
+   * Returns: { pred, meas, pct }
+   * - pred = reference/predicted value
+   * - meas = measured/best value
+   * - pct  = %pred or %(B/P) — used for R5 classification
+   */
+  const findIOS = (regex) => {
     for (const line of lines) {
       if (!regex.test(line)) continue;
       const m = line.match(regex);
-      const rest = line.slice(m.index+m[0].length).replace(/(\d)\s+\.\s+(\d)/g,'$1.$2');
+      const rest = line.slice(m.index + m[0].length)
+        .replace(/(\d)\s+\.\s+(\d)/g,'$1.$2')  // fix split decimals
+        .replace(/kPa\s*\/\s*\(L\/s\)/gi,'')    // strip units
+        .replace(/kPa\/L/gi,'').replace(/1\/s/gi,'');
+
+      // Format C: key=value pairs
+      if (/\w+=/.test(rest)) {
+        const pairs = {};
+        const kv = rest.matchAll(/(\w+)\s*=\s*([-\d.]+)/g);
+        for (const [,k,v] of kv) pairs[k.toLowerCase()] = parseFloat(v);
+        return { pred: pairs.pred??null, meas: pairs.meas??pairs.best??null, pct: pairs.pct??null };
+      }
+
+      // Format A/B/D: positional numbers
       const nums = [...rest.matchAll(/([-]?\d+(?:\.\d+)?)/g)].map(x=>parseFloat(x[1]));
       if (!nums.length) return {};
-      if (nums.length>=3) return { pred:nums[0], meas:nums[1], pct:nums[2] };
-      if (nums.length===2) return nums[1]>20 ? {pred:nums[0],meas:null,pct:nums[1]} : {pred:nums[0],meas:nums[1],pct:null};
-      return { pred:null, meas:nums[0], pct:null };
+
+      // Filter out date-like numbers (e.g. 25-11-25 → skipped already by regex)
+      // nums layout: [pred?, meas, pct?] or [meas, pct?]
+      if (nums.length >= 3) {
+        // If third num > 20, it's likely %pred
+        return { pred: nums[0], meas: nums[1], pct: nums[2] };
+      }
+      if (nums.length === 2) {
+        // Could be [pred, meas] or [meas, pct]
+        return nums[1] > 20
+          ? { pred: nums[0], meas: null, pct: nums[1] }
+          : { pred: nums[0], meas: nums[1], pct: null };
+      }
+      return { pred: null, meas: nums[0], pct: null };
     }
     return {};
   };
-  const r5=findIOS(/^R5\b/i), r20=findIOS(/^R20\b/i), x5=findIOS(/^X5\b/i);
-  const fres=findIOS(/^Fres\b/i), ax=findIOS(/^AX\b/i);
-  const r5_meas=r5.meas, r5_pct=r5.pct;
-  const r20_meas=r20.meas;
-  const x5_pred=x5.pred, x5_meas=x5.meas;
-  const fres_meas=fres.meas??fres.pred;
-  const ax_meas=ax.meas??ax.pred;
-  const di520 = (r5_meas!=null&&r20_meas!=null) ? r5_meas-r20_meas : null;
-  const deltaX5 = (x5_pred!=null&&x5_meas!=null) ? x5_pred-x5_meas : null;
 
-  const flags=[];
-  if (di520!=null&&di520>0.07)  flags.push(`R5-R20 > 0.07 (${di520.toFixed(2)})`);
-  if (x5_meas!=null&&x5_meas<-0.12) flags.push(`X5 < -0.12 (${x5_meas})`);
-  if (fres_meas!=null&&fres_meas>14.14) flags.push(`Fres > 14.14 (${fres_meas})`);
-  if (ax_meas!=null&&ax_meas>0.44) flags.push(`AX > 0.44 (${ax_meas})`);
+  // Regex: match R5, R5Hz, R5Hz kPa... — use /^R5/i (no \b to catch R5Hz)
+  const r5   = findIOS(/^R5/i);
+  const r20  = findIOS(/^R20/i);
+  const x5   = findIOS(/^X5/i);
+  const fres = findIOS(/^Fres/i);
+  const ax   = findIOS(/^AX\b/i);
 
-  let out='';
-  if (flags.length) out+=flags.join('\n')+'\n→ Suspected Peripheral obstruction\n\n';
+  const r5_meas  = r5.meas;
+  const r5_pct   = r5.pct;    // %(B/P) — used for classification
+  const r20_meas = r20.meas;
+  const x5_pred  = x5.pred;
+  const x5_meas  = x5.meas;
+  const fres_meas = fres.meas ?? fres.pred;
+  const ax_meas   = ax.meas  ?? ax.pred;
 
-  if (r5_pct!=null&&deltaX5!=null) {
-    let dx=`ΔX5=${deltaX5.toFixed(2)}`, rp=`R5=${r5_pct}%`;
-    let dx5=x5_meas!=null?`, X5=${x5_meas}`:'';
-    let diagnosis='';
-    if (r5_pct<140) {
-      diagnosis = deltaX5<0.15 ? 'Normal' : 'Restriction';
+  const di520  = (r5_meas!=null && r20_meas!=null) ? r5_meas - r20_meas : null;
+  const deltaX5 = (x5_pred!=null && x5_meas!=null) ? x5_pred - x5_meas : null;
+
+  // Step 1: Screening flags
+  const flags = [];
+  if (di520!=null  && di520>0.07)      flags.push(`R5-R20 > 0.07 (${di520.toFixed(2)})`);
+  if (x5_meas!=null && x5_meas<-0.12) flags.push(`X5 < -0.12 (${x5_meas})`);
+  if (fres_meas!=null && fres_meas>14.14) flags.push(`Fres > 14.14 (${fres_meas})`);
+  if (ax_meas!=null && ax_meas>0.44)   flags.push(`AX > 0.44 (${ax_meas})`);
+
+  let out = '';
+  if (flags.length) out += flags.join('\n') + '\n→ Suspected Peripheral obstruction\n\n';
+
+  // Step 2: Classification
+  if (r5_pct != null && deltaX5 != null) {
+    const rp = `R5=${r5_pct}%`;
+    let dx   = `ΔX5=${deltaX5.toFixed(2)}`;
+    const x5str = x5_meas != null ? `, X5=${x5_meas}` : '';
+    let diagnosis = '';
+
+    if (r5_pct < 140) {
+      diagnosis = deltaX5 < 0.15 ? 'Normal' : 'Restriction';
     } else {
-      if (deltaX5<0.15) { diagnosis='Central obstruction'; }
-      else if (di520!=null) {
-        diagnosis = di520>=0.07 ? 'Peripheral obstruction' : 'Probably central obstruction + restriction';
-        dx+=`, R5-R20=${di520.toFixed(2)}`;
-      } else { diagnosis='Obstruction (subtype unknown: R5-R20 unavailable)'; }
+      if (deltaX5 < 0.15) {
+        diagnosis = 'Central obstruction';
+      } else if (di520 != null) {
+        diagnosis = di520 >= 0.07
+          ? 'Peripheral obstruction'
+          : 'Probably central obstruction + restriction';
+        dx += `, R5-R20=${di520.toFixed(2)}`;
+      } else {
+        diagnosis = 'Obstruction (subtype unknown: Di5-20 unavailable)';
+      }
     }
-    out+=`Diagnostic Classification: ${diagnosis}\n(${rp}, ${dx}${dx5})`;
+    out += `Diagnostic Classification: ${diagnosis}\n(${rp}, ${dx}${x5str})`;
   } else {
-    out+='(Data insufficient — need R5%pred and X5 pred+meas)';
+    // Partial data — show what we have
+    const have = [];
+    if (r5_meas!=null) have.push(`R5 meas=${r5_meas}${r5_pct?', '+r5_pct+'%':''}`);
+    if (x5_meas!=null) have.push(`X5 meas=${x5_meas}`);
+    if (x5_pred!=null) have.push(`X5 pred=${x5_pred}`);
+    if (deltaX5!=null) have.push(`ΔX5=${deltaX5.toFixed(2)}`);
+    out += `(Classification incomplete — need R5%pred and X5 pred+meas)\n`;
+    if (have.length) out += `Available: ${have.join(', ')}`;
   }
-  return out||'(No IOS parameters detected)';
+  return out || '(No IOS parameters detected)';
 }
+
+// ============================================================
+// 5. CT / LDCT (text)}
 
 // ============================================================
 // 5. CT / LDCT (text)
@@ -1362,7 +1447,14 @@ function analyzeCT(text) {
   };
   fN.sort((a,b)=>nRank(a)-nRank(b));
 
-  const aRank=t=>{ if(/Lung-RADS.*Descriptor/i.test(t)) return 0; if(/Category/i.test(t)) return 1; if(/Modifier/i.test(t)) return 2; if(/Comparison/i.test(t)) return 3; if(/No prior/i.test(t)) return 4; return 5; };
+  const aRank=t=>{
+    if (/No prior/i.test(t))            return 0;  // No prior CT → first
+    if (/Lung-RADS.*Descriptor/i.test(t)) return 1; // Lung-RADS header
+    if (/Category/i.test(t))            return 2;  // Category
+    if (/Modifier/i.test(t))            return 3;  // Modifier
+    if (/Comparison/i.test(t))          return 4;  // Comparison date
+    return 5;
+  };
   fA.sort((a,b)=>aRank(a)-aRank(b));
 
   const all=[...fN,...fA,...fO];
