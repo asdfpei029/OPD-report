@@ -243,15 +243,23 @@ textarea:focus{border-color:var(--primary);}
     <div class="section-h purple">✨ Gemini Vision 圖片直接分析（需 API Key）</div>
     <div class="btn-grid-2">
       <button class="btn-analyze purple" onclick="geminiAnalyze('flow_volume')">
-        <span>📉</span><span class="btn-label">Flow Volume<span class="btn-sub">貼圖→直接出結果</span></span>
+        <span>📉</span><span class="btn-label">Flow Volume<span class="btn-sub">圖片→讀數→判讀</span></span>
       </button>
       <button class="btn-analyze purple" onclick="geminiAnalyze('bdt')">
-        <span>🌬️</span><span class="btn-label">BDT<span class="btn-sub">Pre+Post 直接出結果</span></span>
+        <span>🌬️</span><span class="btn-label">BDT<span class="btn-sub">圖片→讀數→判讀</span></span>
       </button>
     </div>
-    <button class="btn-analyze purple" style="width:100%;" onclick="geminiAnalyze('full_pft')">
-      <span>☁️</span><span class="btn-label">完整肺功能<span class="btn-sub">含 TLC、DLCO → 直接出結果</span></span>
-    </button>
+    <div class="btn-grid-2">
+      <button class="btn-analyze purple" onclick="geminiAnalyze('full_pft')">
+        <span>☁️</span><span class="btn-label">完整肺功能<span class="btn-sub">含 TLC、DLCO、MVV</span></span>
+      </button>
+      <button class="btn-analyze purple" onclick="geminiAnalyze('ios')">
+        <span>📶</span><span class="btn-label">IOS 震盪肺功能<span class="btn-sub">R5、X5、Fres、AX</span></span>
+      </button>
+    </div>
+    <div style="font-size:11px;color:var(--sub-text);margin-top:6px;padding:6px 8px;background:#f5f3ff;border-radius:6px;">
+      ⚙ 新架構：Gemini 只負責讀取數字，判讀邏輯由 App 執行，不依賴 Gemini 判斷
+    </div>
   </div>
 
   <!-- PFT 文字 -->
@@ -304,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.5 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.6 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -557,93 +565,192 @@ function handleImages(files) {
 // ============================================================
 // GEMINI VISION ANALYZE
 // ============================================================
+// ============================================================
+// GEMINI VISION — NEW ARCHITECTURE
+// Gemini ONLY extracts numbers into standard text format.
+// App's own text-parsing logic does ALL interpretation.
+// This eliminates Gemini's judgment errors entirely.
+// ============================================================
+
+// Universal extraction prompt — same structure for all PFT types
+const GEMINI_EXTRACT_PROMPT = `You are a medical data extractor. This image contains a pulmonary function test (PFT) report table.
+
+YOUR ONLY JOB: Read the numbers from the table and output them in the exact format below. Do NOT interpret, classify, or diagnose anything.
+
+CRITICAL COLUMN RULES:
+- The table may have columns: Pred / Pre / Pre%Pred / Post / Trial1 / Trial2 / Trial3 / %Pred / %Change
+- "Post" is the column IMMEDIATELY after "Pre%Pred". It is NOT a Trial column.
+- Trial columns (Trial1, Trial2, Trial3) come AFTER Post. IGNORE Trial values.
+- "%Pred" near the end refers to Post%Pred.
+- "%Change" is the last column. IGNORE it.
+- FEV1%FVC row: the "Pre" value is the actual measured FEV1/FVC ratio (e.g. 63.07), NOT a %pred.
+
+OUTPUT FORMAT (one parameter per line, use exact parameter names):
+FVC [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
+FEV1 [L] Pred=X Pre=X Pre%=X% Post=X Post%=X%
+FEV1%FVC [%] Pred=X Pre=X Pre%=X% Post=X Post%=X%
+FEF25-75 [L/s] Pred=X Pre=X Pre%=X% Post=X Post%=X%
+TLC [L] Pred=X Pre=X Pre%=X%
+RV/TLC [%] Pre=X Pre%=X%
+DLCO Pred=X Pre=X Pre%=X%
+KCO Pred=X Pre=X Pre%=X%
+MVV [L/min] Pred=X Pre=X Pre%=X%
+R5 [L/s] Pred=X Meas=X Pct=X%
+R20 [L/s] Pred=X Meas=X Pct=X%
+X5 [L/s] Pred=X Meas=X
+Fres Meas=X
+AX Meas=X
+
+RULES:
+- Only output rows for parameters that actually appear in the image.
+- If a value is missing/not shown, omit that field (don't write N/A).
+- Output ONLY the data lines above. No explanation, no diagnosis, no extra text.`;
+
 async function geminiAnalyze(pftType) {
   const key = localStorage.getItem('gemini_key')||'';
   if (!key) { alert('請先填入 Gemini API Key！'); return; }
-  if (!pendingImages.length) { alert('請先貼上或上傳 PFT 報告圖片！'); return; }
+  if (!pendingImages.length) { alert('請先貼上或上傳報告圖片！'); return; }
 
-  // Build prompt
-  const prompts = {
-    flow_volume: `這是一張肺功能報告圖片（Flow Volume，只有 Pre 數據）。
-請讀取以下參數的數值（%pred 欄位）：FVC %pred、FEV1 %pred、FEV1/FVC（實測值%）、FEF25-75 %pred。
-然後套用以下判讀邏輯輸出結論：
-- FEV1/FVC < 70% → Obstructive ventilatory defect（列出 FEV1/FVC 和 FEV1 %pred）
-- 非Obs 且 FEF25-75 %pred < 65% → Suspected obstructive ventilatory impairment（列出 FEV1/FVC 和 FEF25-75 %pred）
-- 非上述 且 FVC %pred < 80% → Suspected restrictive ventilatory impairment（列出 FVC %pred）
-- 以上皆非 → Normal spirometry
-只輸出最終結論和關鍵數值，格式乾淨，不要多餘說明。`,
-
-    bdt: `這是一張支氣管擴張試驗（BDT）報告圖片，有 Pre 和 Post 兩組數據。
-請讀取：FVC Pre(L)、FVC Pre%pred、FVC Post(L)、FVC Post%pred、FEV1 Pre(L)、FEV1 Pre%pred、FEV1 Post(L)、FEV1 Post%pred、FEV1/FVC Pre%、FEV1/FVC Post%、FEF25-75 %pred（Pre 和 Post）。
-判讀邏輯：
-1. 阻塞判斷：Pre 或 Post FEV1/FVC < 70% → Obstructive；FEF25-75 %pred < 65% → Suspected obstructive；FVC %pred < 80% → Suspected restrictive；否則 Normal
-2. BDT 判斷：FEV1 或 FVC 增加 >12% 且 >200ml → Positive；只符合其一 → Partial positive
-輸出格式：
-第一行：阻塞分類（含關鍵數值）
-第二行：BDT 結果（含增加量）
-格式乾淨，不要多餘說明。`,
-
-    full_pft: `這是一張完整肺功能報告圖片。
-請讀取以下各參數的 %pred 值：FVC、FEV1/FVC（實測%）、FEF25-75、TLC、RV/TLC（實測%）、DLCO、KCO、MVV。
-輸出格式（一行，用頓號分隔）：
-FVC：X%、FEV1/FVC：X%、FEF25-75：X%、TLC：X%、RV/TLC：X%、DLCO：X%、KCO：X%、MVV：X%
-如果某參數圖片中沒有則填 N/A。不要多餘說明。`
-  };
-
-  const gStatus = $('gemini-status');
+  const gStatus   = $('gemini-status');
   const gProgress = $('gemini-progress');
-  const gBar = $('gemini-bar');
+  const gBar      = $('gemini-bar');
+
   gStatus.classList.add('active');
+  gProgress.style.color = 'var(--purple)';
   gProgress.textContent = '送出圖片給 Gemini Vision…';
-  gBar.style.width = '20%';
+  gBar.style.background = 'var(--purple)';
+  gBar.style.width = '15%';
 
   try {
-    // Convert first image to base64
     const file = pendingImages[0];
-    const b64 = await fileToBase64(file);
+    const b64  = await fileToBase64(file);
     const mime = file.type || 'image/png';
 
-    gBar.style.width = '50%';
-    gProgress.textContent = 'Gemini 分析中…';
+    gBar.style.width = '40%';
+    gProgress.textContent = 'Gemini 讀取表格數字中…';
 
     const body = {
       contents: [{
         parts: [
           { inline_data: { mime_type: mime, data: b64 } },
-          { text: prompts[pftType] }
+          { text: GEMINI_EXTRACT_PROMPT }
         ]
       }]
     };
 
-    const res = await fetch(
+    const res  = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`,
       { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) }
     );
     const data = await res.json();
-    gBar.style.width = '90%';
+    gBar.style.width = '75%';
 
     if (data.error) throw new Error(data.error.message);
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '(無回應)';
+    const extractedText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if (!extractedText) throw new Error('Gemini 未回傳任何內容');
 
-    gBar.style.width = '100%';
-    gProgress.textContent = '✓ Gemini 分析完成';
+    gBar.style.width = '85%';
+    gProgress.textContent = '數字擷取完成，套用判讀邏輯…';
 
-    // Show result
-    $('gemini-result-text').textContent = text;
+    // Show extracted text for transparency
+    $('gemini-result-text').textContent = '【Gemini 擷取的原始數字】\n' + extractedText;
     $('gemini-result-preview').style.display = 'block';
 
-    // Also display in main result area
-    const labels = { flow_volume:'Flow Volume (Gemini)', bdt:'BDT (Gemini)', full_pft:'完整肺功能 (Gemini)' };
-    showResult(text, labels[pftType]||'Gemini', 'tag-ai');
+    // Convert Gemini's structured output to the format our text parser understands
+    const parsable = convertGeminiToParserFormat(extractedText);
 
-    setTimeout(()=>{ gStatus.classList.remove('active'); }, 1500);
+    // Run our own text-parsing logic (same as manual text input)
+    gBar.style.width = '95%';
+    let result = '';
+    const typeLabels = {
+      flow_volume: 'Flow Volume',
+      bdt:         'BDT',
+      full_pft:    '完整肺功能',
+      ios:         'IOS',
+    };
+    if      (pftType === 'flow_volume') result = analyzeFlowVolume(parsable);
+    else if (pftType === 'bdt')         result = analyzeBDT(parsable);
+    else if (pftType === 'full_pft')    result = analyzeFullPFT(parsable);
+    else if (pftType === 'ios')         result = analyzeIOS(parsable);
+
+    gBar.style.width = '100%';
+    gProgress.textContent = '✓ 完成（Gemini 讀數 + App 判讀）';
+
+    // Badge coloring
+    let badgeCls = 'tag-ai';
+    if (/Obstructive ventilatory defect/i.test(result))    badgeCls = 'tag-obs';
+    else if (/Suspected obstructive/i.test(result))        badgeCls = 'tag-sus';
+    else if (/Suspected restrictive/i.test(result))        badgeCls = 'tag-res';
+    else if (/Normal spirometry/i.test(result))            badgeCls = 'tag-norm';
+
+    showResult(result, (typeLabels[pftType]||pftType) + ' (圖片)', badgeCls);
+    setTimeout(()=>{ gStatus.classList.remove('active'); }, 2000);
 
   } catch(e) {
     gProgress.textContent = '⚠ 失敗：' + e.message;
     gProgress.style.color = 'var(--red)';
     gBar.style.width = '100%';
     gBar.style.background = 'var(--red)';
+    console.error(e);
   }
+}
+
+/**
+ * Convert Gemini's structured output format into lines our text parser can read.
+ *
+ * Gemini outputs:
+ *   FVC [L] Pred=2.07 Pre=1.30 Pre%=63% Post=1.33 Post%=64%
+ *   FEV1%FVC [%] Pred=78.79 Pre=63.07 Pre%=80% Post=64.37 Post%=82%
+ *   R5 [L/s] Pred=0.35 Meas=0.42 Pct=112%
+ *
+ * Our parser expects lines like:
+ *   FVC [L] 2.07  1.30  63%  1.33  64%
+ *   FEV1%FVC [%] 78.79  63.07  80%  64.37  82%
+ *   R5 (L/s)  0.35  0.42  112%
+ */
+function convertGeminiToParserFormat(text) {
+  const lines = text.split('\n');
+  const out = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('【')) continue;
+
+    // Extract parameter name (everything before first key=value)
+    const nameMatch = trimmed.match(/^([A-Za-z0-9%\/\s\[\]\.]+?)\s+(?=\w+=)/);
+    const paramName = nameMatch ? nameMatch[1].trim() : '';
+    if (!paramName) { out.push(trimmed); continue; }
+
+    // Extract key=value pairs
+    const pairs = {};
+    const kvRegex = /(\w+)\s*=\s*([-\d.]+%?)/g;
+    let m;
+    while ((m = kvRegex.exec(trimmed)) !== null) {
+      pairs[m[1].toLowerCase()] = m[2];
+    }
+
+    // Build parser-friendly line
+    // For PFT: Pred  Pre  Pre%  Post  Post%
+    // For IOS: Pred  Meas  Pct
+    if (pairs.meas !== undefined) {
+      // IOS format
+      const parts = [paramName];
+      if (pairs.pred) parts.push(pairs.pred);
+      if (pairs.meas) parts.push(pairs.meas);
+      if (pairs.pct)  parts.push(pairs.pct);
+      out.push(parts.join('  '));
+    } else {
+      // PFT format
+      const parts = [paramName];
+      if (pairs.pred) parts.push(pairs.pred);
+      if (pairs.pre)  parts.push(pairs.pre);
+      if (pairs['pre%']) parts.push(pairs['pre%']);
+      if (pairs.post) parts.push(pairs.post);
+      if (pairs['post%']) parts.push(pairs['post%']);
+      out.push(parts.join('  '));
+    }
+  }
+  return out.join('\n');
 }
 
 function fileToBase64(file) {
