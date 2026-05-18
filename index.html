@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.11 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.12 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -1006,25 +1006,19 @@ function findPFTParam(lines, keyRegex) {
 }
 
 /**
- * BDT parameter extraction — handles these column layouts:
+ * BDT parameter extraction — complete rewrite
  *
- * Layout A (standard):
- *   Pred  Pre  Pre%Pred  Post  Post%Pred
- *   2.07  1.30   63%    1.33    64%
+ * Key insight: FEV1%FVC row has RATIO values (40-100), not L volumes.
+ * All layouts share the same strategy:
+ *   - First % token = Pre%Pred
+ *   - Number before first % = Pre measured value
+ *   - Number right after first % = Post measured value
+ *   - Second-to-last % (excluding %Change) = Post%Pred
  *
- * Layout B (with Trial columns — most common clinical machines):
- *   Pred  Pre  Pre%Pred  Post  Trial1  Trial2  Trial3  %Pred  %Change
- *   2.07  1.30   63%    1.33   1.30    1.33    1.33    64%     2%
- *
- * Layout C (Pre/Post explicit labels):
- *   Pre: 3.10  82%    Post: 3.45  91%
- *
- * Strategy:
- *   1. Look for explicit "Pre:" / "Post:" labels first (Layout C)
- *   2. Otherwise find ALL % tokens — 
- *      first % = Pre%Pred → number before it = PreL
- *      number immediately after first % = PostL  (ignore Trials)
- *      last % before end (or second-last if %Change exists) = Post%Pred
+ * Special handling for FEV1%FVC:
+ *   Pre value = ratio like 76.29 (not a volume)
+ *   Post value = ratio like 66.85 (not a volume)
+ *   These are in range 40-100, distinguishable from volumes (0.5-8L)
  */
 function findBDTParam(lines, keyRegex) {
   for (const line of lines) {
@@ -1033,55 +1027,49 @@ function findBDTParam(lines, keyRegex) {
     const rest = line.slice(m.index + m[0].length);
     if (!/\d/.test(rest)) continue;
 
-    // --- Layout C: explicit Pre:/Post: labels ---
-    const preM  = rest.match(/[Pp]re\s*:?\s*([\d.]+)/);
-    const postM = rest.match(/[Pp]ost\s*:?\s*([\d.]+)/);
-    const prePctM  = rest.match(/[Pp]re\s*:?\s*[\d.]+\s+([\d.]+)\s*%/);
-    const postPctM = rest.match(/[Pp]ost\s*:?\s*[\d.]+\s+([\d.]+)\s*%/);
-    if (preM && postM) {
+    // --- Gemini key=value format ---
+    if (/\w+%?\s*=\s*[\d.]/.test(rest)) {
+      const pairs = {};
+      for (const [,k,v] of rest.matchAll(/([\w]+%?)\s*=\s*([-\d.]+\s*%?)/g))
+        pairs[k.toLowerCase()] = v.trim().replace('%','');
       return {
-        preL:   parseFloat(preM[1]),
-        prePct: prePctM  ? parseFloat(prePctM[1])  : null,
-        postL:  parseFloat(postM[1]),
-        postPct:postPctM ? parseFloat(postPctM[1]) : null,
+        preL:    pairs['pre']    ? parseFloat(pairs['pre'])    : null,
+        prePct:  pairs['pre%']   ? parseFloat(pairs['pre%'])   : null,
+        postL:   pairs['post']   ? parseFloat(pairs['post'])   : null,
+        postPct: pairs['post%']  ? parseFloat(pairs['post%'])  : null,
       };
     }
 
-    // --- Layout A & B: positional parsing ---
-    // Extract all tokens with their % flag
+    // --- Standard positional parsing ---
+    // Extract signed numbers and % flags
     const tokens = [...rest.matchAll(/([-]?\d+(?:\.\d+)?)\s*(%?)/g)]
-      .map(t => ({ val: parseFloat(t[1]), isPct: t[2] === '%' }));
+      .map(t => ({ val: parseFloat(t[1]), isPct: t[2] === '%' }))
+      // Filter out Z-Score-like small negatives that aren't % tokens
+      .filter(t => t.isPct || (t.val > -50));
 
     const percIdxs = tokens.map((t,i) => t.isPct ? i : -1).filter(x => x >= 0);
 
+    // No % tokens at all
     if (percIdxs.length === 0) {
-      // No % at all — pure number columns: Pred Pre Post (minimal)
       const nums = tokens.map(t => t.val);
       if (nums.length >= 3) return { preL:nums[1], prePct:null, postL:nums[2], postPct:null };
       if (nums.length >= 2) return { preL:nums[0], prePct:null, postL:nums[1], postPct:null };
       return { preL:null, prePct:null, postL:null, postPct:null };
     }
 
-    // First % = Pre%Pred
     const firstPctIdx = percIdxs[0];
     const preL   = firstPctIdx > 0 ? tokens[firstPctIdx - 1].val : null;
     const prePct = tokens[firstPctIdx].val;
+    // PostL = number immediately after first % (skip Trial values — they come after)
+    const postL  = firstPctIdx + 1 < tokens.length ? tokens[firstPctIdx + 1].val : null;
 
-    // PostL = the number immediately after first % (regardless of Trial columns)
-    const postL = (firstPctIdx + 1 < tokens.length) ? tokens[firstPctIdx + 1].val : null;
-
-    // Post%Pred:
-    //   Layout with Trial: Pred Pre Pre% Post T1 T2 T3 PostPred% Change%
-    //   Layout with ZScore: Pred Pre Pre% Post PostPred% ZScore Change%
-    //   In both cases: second-to-last % if last % is %Change (small abs value)
-    //   Z-Score values are small floats (like -2.7) — NOT % tokens, safe to ignore
+    // Post%Pred = second-to-last % if last % looks like %Change (abs ≤ 50)
     let postPct = null;
     if (percIdxs.length >= 2) {
-      const lastPctIdx  = percIdxs[percIdxs.length - 1];
-      const lastVal     = tokens[lastPctIdx].val;
-      // %Change is typically ≤ 50 in absolute value and can be negative
-      const isChange    = Math.abs(lastVal) <= 50 && percIdxs.length >= 3;
-      const postPctIdx  = isChange ? percIdxs[percIdxs.length - 2] : lastPctIdx;
+      const lastIdx = percIdxs[percIdxs.length - 1];
+      const lastVal = tokens[lastIdx].val;
+      const isChange = Math.abs(lastVal) <= 50 && percIdxs.length >= 3;
+      const postPctIdx = isChange ? percIdxs[percIdxs.length - 2] : lastIdx;
       if (postPctIdx !== firstPctIdx) postPct = tokens[postPctIdx].val;
     }
 
@@ -1386,244 +1374,369 @@ function analyzeIOS(text) {
 // 5. CT / LDCT (text)}
 
 // ============================================================
-// 5. CT / LDCT (text)
+// 5. CT / LDCT — Segment-based parser (complete rewrite)
 // ============================================================
 function analyzeCT(text) {
-  const lines = text.split('\n');
-  const nodules=[], assessment=[], others=[];
-  let otherLungBuf=[];
+  const lines = text.split('\n').map(l => l.trimEnd());
 
-  const LUNG_KW=['Emphysema','Bronchiectasis','Bronchitis','Tree-in-bud','Centrilobular','Old pulmonary TB','Interstitial lung disease'];
-  const NODULE_RE=/Lung nodule|Juxtapleural|Nodule with benign|Airway nodule|Atypical pulmonary|Perifissural/i;
-  const ASSESS_RE=/Lung-RADS|Category\s*[0-4X]|Modifier|No prior chest CT/i;
-  const FILTER_RE=/醫師|放診|Reporting\s*Physician/i;
-  const QUALITY_RE=/Quality.*(Good|Acceptable|Not Acceptable)/i;
+  // ---- Output buckets ----
+  const nodules        = [];
+  const assessment     = [];
+  const others         = [];
+  const uncheckedNodules = new Set();  // track □ nodule blocks to exclude their #N details
 
-  // Safari-safe check parser (no lookbehind)
-  // Returns only content from CHECKED items (■, [v], [x], ✓, √)
-  // Unchecked □ items are completely ignored
-  function getChecked(line) {
-    // First: if line has NO checked marker at all → skip entirely
-    const hasCheck = /\[\s*[vVxX]\s*\]|[■⬛✓√]|\bv\b/i.test(line);
-    if (!hasCheck) return [];
+  // ---- Constants ----
+  const FILTER_RE  = /醫師|放診|Reporting\s*Physician/i;
+  const QUALITY_RE = /(?:LDCT\s+)?Quality.*(?:Good|Acceptable|Not Acceptable)/i;
+  const LUNG_KW    = ['Emphysema','Bronchiectasis','Bronchitis','Tree-in-bud',
+                      'Centrilobular','Old pulmonary TB','Interstitial lung disease'];
 
+  // ---- Check marker detection ----
+  const isChecked = line => /\[\s*[vVxX]\s*\]|[■⬛✓√]/.test(line);
+
+  function checkedContent(line) {
+    if (!isChecked(line)) return null;
     let t = line
-      .replace(/\[\s*[vVxX]\s*\]/g, '\x00')  // [v] → delimiter
-      .replace(/[■⬛✓√]/g, '\x00')            // ■ → delimiter
-      .replace(/\bv\b/gi, '\x00');             // lone v → delimiter
-
+      .replace(/\[\s*[vVxX]\s*\]/g, '\x00')
+      .replace(/[■⬛✓√]/g, '\x00')
+      .replace(/\bv\b/gi, '\x00');
     const parts = t.split('\x00');
     const results = [];
     for (let k = 1; k < parts.length; k++) {
-      // Stop at first unchecked □ within this segment
-      const item = parts[k]
-        .replace(/\[\s*\]|□/g, '\x01')
-        .split('\x01')[0]
-        .trim();
+      const item = parts[k].replace(/\[\s*\]|□/g,'\x01').split('\x01')[0].trim();
       if (item) results.push(item);
     }
-    return results;
+    return results.length ? results : null;
   }
 
-  // Pre-scan: #N detail lines
-  const detailMap={};
-  for (const line of lines) {
-    const m=line.trim().match(/^#\s*(\d+)[:.]\s*(.*)/);
-    if (m) detailMap[m[1]]=m[2].trim();
-  }
-  const usedDetails=new Set();
-
-  // Comparison line
-  for (const line of lines) {
-    if (/In comparison with/i.test(line)) {
-      const checks=getChecked(line);
-      if (checks.some(c=>/No prior chest CT/i.test(c))) assessment.push('No prior chest CT available');
-      // Check for date in line
-      const dateM=line.match(/(\d{4}[-\/]\d{2}[-\/]\d{2}|\d+[-\/]\d+[-\/]\d+)/);
-      if (dateM && !checks.some(c=>/No prior/i.test(c))) assessment.push(`Comparison: ${dateM[0]}`);
-    }
-  }
-
-  let i=0;
-  while (i<lines.length) {
-    const line=lines[i]; const trimmed=line.trim(); i++;
-    if (!trimmed||FILTER_RE.test(trimmed)||QUALITY_RE.test(trimmed)) continue;
-    if (/^\[?\s*impression\s*\]?:?/i.test(trimmed)) continue;
-
-    // Lung-RADS header
-    if (/Lung-RADS.*Descriptor/i.test(trimmed)) {
-      const clean=trimmed.replace(/[\[\]vVxX✓√■⬛]/g,'').replace(/\s+/g,' ').trim();
-      assessment.push(clean); continue;
-    }
-
-    // Nodule block
-    const nodHdrM=trimmed.match(/Lung nodule\s+(\d+)\b/i);
-    if (nodHdrM) {
-      const num=nodHdrM[1];
-      const nd={size:'',density:'',lobe:'',seIm:'',status:''};
-      const hChecks=getChecked(trimmed);
-      while (i<lines.length) {
-        const nt=lines[i].trim();
-        if (!nt){i++;continue;}
-        if (/Lung nodule|Lung nodules else|Airway nodule|Atypical|Perifissural|Other.*Findings|Overall|Impression/i.test(nt)) break;
-        i++;
-        const sChecks=getChecked(nt);
-        const szM=nt.match(/Entire Nodule:?\s*([\d.]+)\s*mm/i);
-        if (szM) nd.size=`${szM[1]}mm`;
-        const seM=nt.match(/\(SE\s*\d+[/,]\s*IM\s*\d+\)/i)||nt.match(/\(SE.*?\)/i);
-        if (seM) nd.seIm=seM[0];
-        sChecks.forEach(val=>{
-          if (/solid|ground.?glass|part.?solid|calcif/i.test(val)) nd.density=val.replace(/[:;,]+$/,'').trim();
-          if (/RUL|RML|RLL|LUL|LLL/i.test(val)) nd.lobe=val.replace(/[:;,]+$/,'').trim();
-          if (/unchanged|enlarging|newly|decreased|increased|stable/i.test(val)) nd.status=val.replace(/[:;,]+$/,'').trim();
-          // size change mm
-          const mmM=val.match(/([\d.]+)\s*mm.*?([\d.]+)\s*mm/);
-          if (mmM&&!nd.size) nd.size=`${mmM[1]}→${mmM[2]}mm`;
-        });
+  // ---- Pre-scan: collect #N detail lines and * detail lines ----
+  const detailMap = {};
+  const starDetail = {};
+  for (let si = 0; si < lines.length; si++) {
+    const t = lines[si].trim();
+    const hashM = t.match(/^#\s*(\d+)[:.] *(.*)/);
+    if (hashM) { detailMap[hashM[1]] = hashM[2].trim(); continue; }
+    if (/^[*•]/.test(t)) {
+      const content = t.replace(/^[*•]\s*/,'').trim();
+      if (content) {
+        const imM = content.match(/IM[:\s]*(\d+)/i);
+        if (imM) starDetail[imM[1]] = content;
+        starDetail['_'+si] = content;
       }
-      if (hChecks.length===0&&!detailMap[num]) { continue; }
-      let textToAdd='';
-      if (detailMap[num]) {
-        let det=detailMap[num];
-        if (nd.status&&!det.toLowerCase().includes(nd.status.toLowerCase().slice(0,5))) det+=` (${nd.status})`;
-        textToAdd=`Lung nodule ${num}: ${det}`;
-        usedDetails.add(num);
+    }
+  }
+  const usedDetails = new Set();
+
+  // ---- Comparison / prior CT ----
+  // Scan all lines for prior CT info — date may be on next line
+  for (let ci = 0; ci < lines.length; ci++) {
+    const line = lines[ci];
+    if (/No prior chest CT available/i.test(line) && isChecked(line)) {
+      if (!assessment.some(a=>/No prior/i.test(a)))
+        assessment.push('No prior chest CT available');
+      continue;
+    }
+    if (!/In comparison.*CT/i.test(line)) continue;
+    // Check this line and next 3 lines for date
+    const window = lines.slice(ci, ci+4).join(' ');
+    const checkedNoPrior = lines.slice(ci, ci+4).some(l => /No prior chest CT/i.test(l) && isChecked(l));
+    if (checkedNoPrior) {
+      if (!assessment.some(a=>/No prior/i.test(a)))
+        assessment.push('No prior chest CT available');
+    } else {
+      // Look for date in window
+      const minM = window.match(/民國\s*(\d+)\s*\(Y\)\s*\/?\s*(\d+)\s*\(M\)\s*\/?\s*(\d+)/i);
+      if (minM && !assessment.some(a=>/No prior|Comparison/i.test(a))) {
+        assessment.push('Comparison: ' + (parseInt(minM[1])+1911) + '/' + minM[2] + '/' + minM[3]);
       } else {
-        const parts=[];
-        if (nd.size) parts.push(nd.size);
+        const dateM = window.match(/(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})/);
+        if (dateM && !assessment.some(a=>/No prior|Comparison/i.test(a)))
+          assessment.push('Comparison: ' + dateM[1]);
+      }
+    }
+  }
+
+  // ---- Main scan ----
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]; const trimmed = line.trim(); i++;
+    if (!trimmed) continue;
+    if (FILTER_RE.test(trimmed) || QUALITY_RE.test(trimmed)) continue;
+    if (/^CTDIvol|^Total DLP|^LDCT重度|^詳細規範|\.{3,}|^…+/i.test(trimmed)) continue;
+    if (/^\[?\s*Impression\s*\]?:?/i.test(trimmed)) { i = lines.length; continue; }
+
+    // Lung-RADS Descriptor header
+    if (/Lung-RADS.*Descriptor/i.test(trimmed)) {
+      const clean = trimmed.replace(/[\[\]■□✓√vVxX⬛]/g,'').replace(/\s+/g,' ').trim();
+      if (clean) assessment.push(clean); continue;
+    }
+
+    // Modifier S — must come BEFORE Category check (Modifier S text contains "category 0-4")
+    if (/Modifier\s*S/i.test(trimmed) && isChecked(trimmed)) {
+      const descM = trimmed.match(/Modifier\s*S[^(（]*[（(]([^)）]+)[)）]/i);
+      assessment.push(descM ? 'Modifier S (' + descM[1].trim() + ')' : 'Modifier S');
+      continue;
+    }
+
+    // Category lines
+    if (/Category\s*[0-4X]/i.test(trimmed) && isChecked(trimmed)) {
+      const cc = checkedContent(trimmed);
+      if (cc) cc.forEach(c => {
+        const clean = c.trim().replace(/^Category\s*/i,'').replace(/[:;,]+$/,'').trim();
+        if (clean) assessment.push('Category ' + clean);
+      });
+      continue;
+    }
+
+    // Modifier S (already handled above, skip duplicate)
+    if (/Modifier\s*S/i.test(trimmed) && isChecked(trimmed)) {
+      const descM = trimmed.match(/Modifier\s*S[^(（]*[（(]([^)）]+)[)）]/i);
+      assessment.push(descM ? 'Modifier S (' + descM[1].trim() + ')' : 'Modifier S');
+      continue;
+    }
+
+    // 請至門診就診
+    if (/請至門診就診/i.test(trimmed) && isChecked(trimmed)) {
+      const descM = trimmed.match(/請至門診就診\s*[（(]([^）)]+)[）)]/);
+      assessment.push(descM ? '請至門診就診 (' + descM[1].trim() + ')' : '請至門診就診');
+      continue;
+    }
+
+    // No lung nodule
+    if (/No lung nodule/i.test(trimmed) && isChecked(trimmed)) {
+      nodules.push('No lung nodule'); continue;
+    }
+
+    // Nodule with benign features
+    if (/Nodule with benign/i.test(trimmed) && isChecked(trimmed)) {
+      nodules.push('Nodule with benign features'); continue;
+    }
+
+    // <6mm nodules
+    if (/Lung nodule.*<6mm/i.test(trimmed) && isChecked(trimmed)) {
+      const seIm = trimmed.match(/SE[:\s]*(\d+)[,\s]*IM[:\s]*(\d+)/i);
+      let text = 'Lung nodule(s) (<6mm)';
+      if (seIm) text += ': SE' + seIm[1] + '/IM' + seIm[2];
+      // Look for * detail line immediately after
+      let nextIdx = i;
+      while (nextIdx < lines.length && !lines[nextIdx].trim()) nextIdx++;
+      const nextL = lines[nextIdx] ? lines[nextIdx].trim() : '';
+      if (/^[*•]/.test(nextL)) {
+        text += ' — ' + nextL.replace(/^[*•]\s*/,'').trim();
+        i = nextIdx + 1;
+      } else if (seIm && starDetail[seIm[2]]) {
+        text += ' — ' + starDetail[seIm[2]];
+      }
+      nodules.push(text); continue;
+    }
+
+    // ≧6mm total number
+    if (/Lung nodule.*(?:≧6mm|>=6mm|total number)/i.test(trimmed)) {
+      if (isChecked(trimmed)) {
+        const numM = trimmed.match(/(?:\[\s*[■vVxX]\s*\]|■)\s*(\d+|>=?\s*\d+)/i)
+          || trimmed.match(/total number[^\d]*(\d+)/i);
+        if (numM) nodules.push('Lung nodule(s) ≧6mm: total number ' + numM[1].trim());
+      }
+      continue;
+    }
+
+    // Lung nodule N block
+    const nodNumMAll = trimmed.match(/Lung nodule\s+(\d+)\s*\(/i);
+    if (nodNumMAll && !isChecked(trimmed)) {
+      uncheckedNodules.add(nodNumMAll[1]);
+      // Skip sub-lines for unchecked nodule
+      while (i < lines.length) {
+        const nt = lines[i].trim();
+        if (!nt) { i++; continue; }
+        if (/Lung nodule\s+\d+|Lung nodules else|Other.*Findings|Overall|Impression|Lung-RADS|Category/i.test(nt)) break;
+        i++;
+      }
+      continue;
+    }
+    const nodNumM = trimmed.match(/Lung nodule\s+(\d+)\s*\(/i);
+    if (nodNumM && isChecked(trimmed)) {
+      const num = nodNumM[1];
+      const nd = { size:'', density:'', lobe:'', seIm:'', status:'' };
+      while (i < lines.length) {
+        const nt = lines[i].trim();
+        if (!nt) { i++; continue; }
+        if (/Lung nodule\s+\d+|Lung nodules else|Other.*Findings|Overall|Impression|Lung-RADS|Category/i.test(nt)) break;
+        i++;
+        if (FILTER_RE.test(nt)) continue;
+        const szM = nt.match(/Entire Nodule[:\s]*([\d.]+)\s*mm/i);
+        if (szM) nd.size = szM[1] + 'mm';
+        const seM = nt.match(/\(?\s*SE[:\s]*(\d+)[,\/\s]*IM[:\s]*(\d+)\s*\)?/i);
+        if (seM) nd.seIm = '(SE' + seM[1] + '/IM' + seM[2] + ')';
+        if (isChecked(nt)) {
+          const cc = checkedContent(nt);
+          if (cc) cc.forEach(val => {
+            const v = val.trim();
+            if (/solid|ground.?glass|part.?solid|calcif|non.?solid/i.test(v)) nd.density = v;
+            if (/RUL|RML|RLL|LUL|LLL/i.test(v)) nd.lobe = v;
+            if (/unchanged|enlarging|newly|decreased|increased|stable|No prior/i.test(v)) nd.status = v;
+          });
+        }
+      }
+      let textToAdd = '';
+      // Match detail: IM number match FIRST (most reliable), then by nodule number
+      let matchedDetailKey = null;
+      if (nd.seIm) {
+        const ndIM = nd.seIm.match(/IM(\d+)/i)?.[1];
+        if (ndIM) {
+          for (const [k, v] of Object.entries(detailMap)) {
+            if (v.includes('IM' + ndIM) || v.includes('IM ' + ndIM)) { matchedDetailKey = k; break; }
+          }
+        }
+      }
+      // Fallback: match by nodule number only if not already used by another entry
+      if (!matchedDetailKey && detailMap[num] && !usedDetails.has(num)) {
+        matchedDetailKey = num;
+      }
+      if (matchedDetailKey) {
+        let det = detailMap[matchedDetailKey];
+        if (nd.status && !det.toLowerCase().includes(nd.status.toLowerCase().slice(0,5)))
+          det += ' (' + nd.status + ')';
+        textToAdd = 'Lung nodule ' + num + ': ' + det;
+        usedDetails.add(matchedDetailKey);
+      } else if (nd.size || nd.density || nd.lobe) {
+        const parts = [];
+        if (nd.size)    parts.push(nd.size);
         if (nd.density) parts.push(nd.density);
-        if (nd.lobe) parts.push(nd.lobe+(nd.seIm?' '+nd.seIm:''));
+        if (nd.lobe)    parts.push(nd.lobe + (nd.seIm ? ' '+nd.seIm : ''));
         else if (nd.seIm) parts.push(nd.seIm);
-        if (nd.status) parts.push(nd.status);
-        if (parts.length) textToAdd=`Lung nodule ${num}: ${parts.join(', ')}`;
+        if (nd.status)  parts.push(nd.status);
+        textToAdd = 'Lung nodule ' + num + ': ' + parts.join(', ');
       }
       if (textToAdd) nodules.push(textToAdd);
       continue;
     }
 
     // Lung nodules else
-    if (/Lung nodules else/i.test(trimmed)) {
-      const checks=getChecked(trimmed);
-      if (checks.length) {
-        const lobes=[];
-        checks.forEach(c=>{ ['RUL','RML','RLL','LUL','LLL'].forEach(l=>{ if(c.toUpperCase().includes(l)) lobes.push(l); }); });
-        const seM=trimmed.match(/\(SE.*?\)/i);
-        if (lobes.length) nodules.push(`Lung nodules else: ${lobes.join(', ')}${seM?' '+seM[0]:''}`);
+    if (/Lung nodules else/i.test(trimmed) && isChecked(trimmed)) {
+      const cc = checkedContent(trimmed);
+      if (cc) {
+        const lobes = [];
+        cc.forEach(c => ['RUL','RML','RLL','LUL','LLL'].forEach(l => {
+          if (c.toUpperCase().includes(l)) lobes.push(l);
+        }));
+        const seM = trimmed.match(/\(SE.*?\)/i);
+        if (lobes.length) nodules.push('Lung nodules else: ' + lobes.join(', ') + (seM?' '+seM[0]:''));
       }
       continue;
     }
 
-    // Total number — only process if line has a checked marker
-    if (/Lung nodule.*total number/i.test(trimmed)) {
-      const hasChecked = /\[\s*[vVxX]\s*\]|[■⬛✓√]|\bv\s+\d/i.test(trimmed);
-      if (hasChecked) {
-        const cM=trimmed.match(/total number\b.*?(\d+|>=?\s*\d+)/i);
-        if (cM) {
-          let desc=trimmed.split(/total number/i)[0].replace(/\[.*?\]/g,'').replace(/[vVxX✓√■⬛]/g,'').replace(/\s+/g,' ').trim().replace(/[:;,]+$/,'');
-          nodules.push(`${desc||'Lung nodule(s)'}: total number ${cM[1].replace(/\s+/g,'')}`);
-        }
+    // Juxtapleural / Perifissural
+    if (/Juxtapleural|Perifissural/i.test(trimmed) && isChecked(trimmed)) {
+      nodules.push('Juxtapleural nodule'); continue;
+    }
+
+    // Other significant abnormal findings (multi-line support)
+    if (/Other significant abnormal/i.test(trimmed) && isChecked(trimmed)) {
+      const labelM = trimmed.match(/Other significant abnormal[^:：]*[:：]\s*(.*)/i);
+      let content = labelM ? labelM[1].trim() : '';
+      const contLines = [];
+      while (i < lines.length) {
+        const nt = lines[i].trim();
+        if (!nt) { i++; continue; }
+        if (/^\d+\./.test(nt)) { contLines.push(nt); i++; }
+        else break;
       }
+      if (contLines.length) content = contLines.join(' ');
+      if (content) others.push(content);
       continue;
     }
 
-    // Perifissural nodule
-    if (/perifissural/i.test(trimmed)) {
-      const checks=getChecked(trimmed);
-      if (checks.length) checks.forEach(c=>nodules.push(c.replace(/[:;,]+$/,'').trim()));
-      continue;
-    }
+    // Other Lung Findings header — skip label line itself
+    if (/^Other Lung Findings/i.test(trimmed)) continue;
+    if (/^Other Findings/i.test(trimmed)) continue;
 
-    // Generic checkmarks
-    const checks=getChecked(trimmed);
-    for (let c of checks) {
-      c=c.replace(/^[_.\s:]+/,'').replace(/[:;,]+$/,'').trim();
-      if (!c||/^(Good|Acceptable|Not Acceptable)$/i.test(c)) continue;
-      if (/^Other\s*[:：]/i.test(c)) c=c.replace(/^Other\s*[:：]\s*/i,'').trim();
-
-      const lkw=LUNG_KW.find(kw=>c.toLowerCase().startsWith(kw.toLowerCase()));
-      if (lkw){ otherLungBuf.push(c); continue; }
-      if (ASSESS_RE.test(c)){ assessment.push(c); continue; }
-      if (NODULE_RE.test(c)){ nodules.push(c); continue; }
+    // Generic checked items
+    if (!isChecked(trimmed)) continue;
+    const cc = checkedContent(trimmed);
+    if (!cc) continue;
+    for (let c of cc) {
+      c = c.replace(/^[_.\s:]+/,'').replace(/[:;,]+$/,'').trim();
+      if (!c || /^(Good|Acceptable|Not Acceptable|Incomplete)$/i.test(c)) continue;
+      if (/^Other\s*[:：]/i.test(c)) c = c.replace(/^Other\s*[:：]\s*/i,'').trim();
+      if (!c) continue;
+      const lkw = LUNG_KW.find(kw => c.toLowerCase().startsWith(kw.toLowerCase()));
+      if (lkw) { others.push(c); continue; }
       others.push(c);
     }
   }
 
-  // Remaining detail lines
-  for (const [num,txt] of Object.entries(detailMap)) {
-    if (!usedDetails.has(num)) nodules.push(`Lung nodule ${num}: ${txt}`);
+  // ---- Add unused #N details (only if nodule block was checked or no block exists) ----
+  for (const [num, txt] of Object.entries(detailMap)) {
+    if (!usedDetails.has(num) && !uncheckedNodules.has(num))
+      nodules.push('Lung nodule ' + num + ': ' + txt);
   }
 
-  // Merge other lung findings
-  if (otherLungBuf.length) others.unshift(otherLungBuf.join(' / '));
-
-  // Smart merge general ↔ detailed
-  const genNod = nodules.filter(f=>/^Lung nodule \d+:/i.test(f)===false);
-  let detNod   = nodules.filter(f=>/^Lung nodule \d+:/i.test(f));
-
-  const merged=[];
+  // ---- Smart merge: general ↔ #N detail by IM number ----
+  const genNod = nodules.filter(f => !/^Lung nodule \d+:/i.test(f));
+  let detNod   = nodules.filter(f =>  /^Lung nodule \d+:/i.test(f));
+  const finalNodules = [];
   for (const gen of genNod) {
-    const gl=gen.toLowerCase();
-    const genIMs=[...gen.matchAll(/IM[:\s]*(\d+)/gi)].map(m=>m[1]);
-    let mi=-1;
-    for (let k=0;k<detNod.length;k++) {
-      const dl=detNod[k].toLowerCase();
-      const di=[...detNod[k].matchAll(/IM[:\s]*(\d+)/gi)].map(m=>m[1]);
-      if (genIMs.length&&di.some(im=>genIMs.includes(im))){ mi=k; break; }
-      if (gl.includes('juxtapleural')&&dl.includes('juxtapleural')){ mi=k; break; }
-      if (gl.includes('benign')&&(dl.includes('benign')||dl.includes('calcif'))){ mi=k; break; }
-      if (gl.includes('perifissural')&&dl.includes('perifissural')){ mi=k; break; }
+    const genIMs = [...gen.matchAll(/IM[:\/\s]*(\d+)/gi)].map(m => m[1]);
+    let mi = -1;
+    for (let k = 0; k < detNod.length; k++) {
+      const di = [...detNod[k].matchAll(/IM[:\/\s]*(\d+)/gi)].map(m => m[1]);
+      if (genIMs.length && di.some(im => genIMs.includes(im))) { mi = k; break; }
+      const gl = gen.toLowerCase(), dl = detNod[k].toLowerCase();
+      if ((gl.includes('benign')||gl.includes('calcif')) && (dl.includes('benign')||dl.includes('calcif'))) { mi=k; break; }
+      if (gl.includes('juxtapleural') && dl.includes('juxtapleural')) { mi=k; break; }
     }
-    if (mi>=0) {
-      const core=detNod.splice(mi,1)[0].replace(/^Lung nodule \d+:\s*/i,'');
-      merged.push(`${gen} — ${core}`);
-    } else { merged.push(gen); }
+    if (mi >= 0) {
+      const core = detNod.splice(mi,1)[0].replace(/^Lung nodule \d+:\s*/i,'');
+      finalNodules.push(gen + ' — ' + core);
+    } else { finalNodules.push(gen); }
   }
-  detNod.forEach(d=>merged.push(d));
+  detNod.forEach(d => finalNodules.push(d));
 
-  // Dedup
-  const norm=s=>s.replace(/Lung nodule \d+:\s*/i,'').replace(/[^a-z0-9]/gi,'').toLowerCase();
-  const dedup=arr=>{
-    const out=[];
+  // ---- Dedup ----
+  const norm = s => s.replace(/Lung nodule \d+:\s*/i,'').replace(/[^a-z0-9]/gi,'').toLowerCase();
+  function dedup(arr) {
+    const out = [];
     for (const item of arr) {
-      const n=norm(item); let dup=false;
-      for (let k=0;k<out.length;k++) {
-        const en=norm(out[k]);
+      const n = norm(item); let dup = false;
+      for (let k = 0; k < out.length; k++) {
+        const en = norm(out[k]);
         if (n===en||n.includes(en)||en.includes(n)) { if(item.length>out[k].length) out[k]=item; dup=true; break; }
       }
       if (!dup) out.push(item);
     }
     return out;
+  }
+
+  // ---- Sort ----
+  const nRank = t => {
+    if (/No lung nodule/i.test(t))  return 1;
+    if (/<6mm/i.test(t))            return 2;
+    if (/≧6mm.*total/i.test(t))     return 3;
+    if (/benign|calcif/i.test(t))   return 4;
+    if (/juxtapleural/i.test(t))    return 5;
+    if (/perifissural/i.test(t))    return 6;
+    if (/airway/i.test(t))          return 7;
+    if (/cyst/i.test(t))            return 8;
+    const m = t.match(/Lung nodule\s*(\d+)/i); if(m) return 20+parseInt(m[1]);
+    if (/nodules else/i.test(t))    return 30;
+    return 10;
+  };
+  const aRank = t => {
+    if (/No prior/i.test(t))              return 0;
+    if (/Comparison:/i.test(t))           return 1;
+    if (/Lung-RADS.*Descriptor/i.test(t)) return 2;
+    if (/Category/i.test(t))             return 3;
+    if (/Modifier/i.test(t))             return 4;
+    if (/請至門診/i.test(t))              return 5;
+    return 6;
   };
 
-  const fN=dedup(merged), fA=dedup(assessment), fO=dedup(others);
+  const fN = dedup(finalNodules); fN.sort((a,b) => nRank(a)-nRank(b));
+  const fA = dedup(assessment);   fA.sort((a,b) => aRank(a)-aRank(b));
+  const fO = dedup(others);
 
-  // Sort nodules
-  const nRank=t=>{
-    if (/total number/i.test(t)) return 5;
-    if (/<6mm|less than 6/i.test(t)) return 10;
-    if (/benign|calcif/i.test(t)) return 15;
-    if (/juxtapleural/i.test(t)) return 16;
-    if (/perifissural/i.test(t)) return 17;
-    if (/airway nodule/i.test(t)) return 18;
-    if (/cyst/i.test(t)) return 19;
-    const m=t.match(/Lung nodule\s*(\d+)/i); if(m) return 30+parseInt(m[1]);
-    if (/nodules else/i.test(t)) return 50;
-    return 20;
-  };
-  fN.sort((a,b)=>nRank(a)-nRank(b));
-
-  const aRank=t=>{
-    if (/No prior/i.test(t))            return 0;  // No prior CT → first
-    if (/Lung-RADS.*Descriptor/i.test(t)) return 1; // Lung-RADS header
-    if (/Category/i.test(t))            return 2;  // Category
-    if (/Modifier/i.test(t))            return 3;  // Modifier
-    if (/Comparison/i.test(t))          return 4;  // Comparison date
-    return 5;
-  };
-  fA.sort((a,b)=>aRank(a)-aRank(b));
-
-  const all=[...fN,...fA,...fO];
-  return all.length ? all.map(x=>`• ${x}`).join('\n') : '(No structured findings — check input format)';
+  const all = [...fN, ...fA, ...fO];
+  return all.length ? all.map(x => '• ' + x).join('\n') : '(No structured findings — check input format)';
 }
 
 // ============================================================
