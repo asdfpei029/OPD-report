@@ -118,7 +118,24 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Header -->
 <header style="margin-bottom:20px;text-align:center;position:relative;">
-  <div style="font-size:26px;margin-bottom:4px;">🫁</div>
+  <div style="margin-bottom:6px;">
+    <svg width="44" height="44" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:inline-block;">
+      <!-- Trachea -->
+      <rect x="29" y="4" width="6" height="14" rx="3" fill="#2563eb"/>
+      <!-- Left bronchus -->
+      <path d="M29 16 Q18 18 14 26" stroke="#2563eb" stroke-width="4" stroke-linecap="round" fill="none"/>
+      <!-- Right bronchus -->
+      <path d="M35 16 Q46 18 50 26" stroke="#2563eb" stroke-width="4" stroke-linecap="round" fill="none"/>
+      <!-- Left lung -->
+      <ellipse cx="16" cy="38" rx="12" ry="16" fill="#93c5fd" opacity="0.7"/>
+      <path d="M14 26 Q4 30 6 44 Q8 56 16 56 Q24 56 26 44 Q28 30 14 26Z" fill="#2563eb" opacity="0.85"/>
+      <!-- Right lung -->
+      <path d="M50 26 Q60 30 58 44 Q56 56 48 56 Q40 56 38 44 Q36 30 50 26Z" fill="#2563eb" opacity="0.85"/>
+      <!-- Highlight -->
+      <ellipse cx="13" cy="36" rx="4" ry="7" fill="white" opacity="0.2"/>
+      <ellipse cx="51" cy="36" rx="4" ry="7" fill="white" opacity="0.2"/>
+    </svg>
+  </div>
   <h1 style="font-size:21px;font-weight:700;color:var(--primary);margin-bottom:3px;">醫療報告重點擷取助手</h1>
   <p style="font-size:12px;color:var(--sub-text);">肺功能 (PFT / IOS / BDT) · 胸腔電腦斷層 (Chest CT / LDCT)</p>
   <button onclick="openModal()" style="position:absolute;top:0;right:0;font-size:12px;background:var(--sub-bg);border:1px solid var(--border);color:var(--sub-text);padding:5px 11px;border-radius:8px;cursor:pointer;">ℹ 判讀邏輯</button>
@@ -287,7 +304,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.4 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.5 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -767,33 +784,90 @@ function findPFTParam(lines, keyRegex) {
   return { predPct:null, measuredRaw:null };
 }
 
+/**
+ * BDT parameter extraction — handles these column layouts:
+ *
+ * Layout A (standard):
+ *   Pred  Pre  Pre%Pred  Post  Post%Pred
+ *   2.07  1.30   63%    1.33    64%
+ *
+ * Layout B (with Trial columns — most common clinical machines):
+ *   Pred  Pre  Pre%Pred  Post  Trial1  Trial2  Trial3  %Pred  %Change
+ *   2.07  1.30   63%    1.33   1.30    1.33    1.33    64%     2%
+ *
+ * Layout C (Pre/Post explicit labels):
+ *   Pre: 3.10  82%    Post: 3.45  91%
+ *
+ * Strategy:
+ *   1. Look for explicit "Pre:" / "Post:" labels first (Layout C)
+ *   2. Otherwise find ALL % tokens — 
+ *      first % = Pre%Pred → number before it = PreL
+ *      number immediately after first % = PostL  (ignore Trials)
+ *      last % before end (or second-last if %Change exists) = Post%Pred
+ */
 function findBDTParam(lines, keyRegex) {
   for (const line of lines) {
     if (!keyRegex.test(line)) continue;
     const m = line.match(keyRegex);
-    const rest = line.slice(m.index+m[0].length);
+    const rest = line.slice(m.index + m[0].length);
     if (!/\d/.test(rest)) continue;
-    const tokens = [...rest.matchAll(/([-\d]+(?:\.\d+)?)\s*(%?)/g)];
-    const percIdxs = tokens.map((t,i)=>t[2]==='%'?i:-1).filter(x=>x>=0);
-    if (percIdxs.length>=2) {
-      const pi=percIdxs[0], pi2=percIdxs[1];
+
+    // --- Layout C: explicit Pre:/Post: labels ---
+    const preM  = rest.match(/[Pp]re\s*:?\s*([\d.]+)/);
+    const postM = rest.match(/[Pp]ost\s*:?\s*([\d.]+)/);
+    const prePctM  = rest.match(/[Pp]re\s*:?\s*[\d.]+\s+([\d.]+)\s*%/);
+    const postPctM = rest.match(/[Pp]ost\s*:?\s*[\d.]+\s+([\d.]+)\s*%/);
+    if (preM && postM) {
       return {
-        prePct:  parseFloat(tokens[pi][1]),
-        preL:    pi>0 ? parseFloat(tokens[pi-1][1]) : null,
-        postPct: parseFloat(tokens[pi2][1]),
-        postL:   pi+1<tokens.length ? parseFloat(tokens[pi+1][1]) : null,
+        preL:   parseFloat(preM[1]),
+        prePct: prePctM  ? parseFloat(prePctM[1])  : null,
+        postL:  parseFloat(postM[1]),
+        postPct:postPctM ? parseFloat(postPctM[1]) : null,
       };
-    } else if (percIdxs.length===1) {
-      const pi=percIdxs[0];
-      const nums=tokens.map(t=>parseFloat(t[1]));
-      return { prePct:nums[pi], preL:pi>0?nums[pi-1]:null, postPct:null, postL:pi<nums.length-1?nums[pi+1]:null };
-    } else {
-      const nums=tokens.map(t=>parseFloat(t[1]));
-      if (nums.length>=4) return { preL:nums[1],prePct:nums[2],postL:nums[3],postPct:nums[4]||null };
-      if (nums.length>=2) return { preL:nums[0],prePct:null,postL:nums[1],postPct:null };
     }
+
+    // --- Layout A & B: positional parsing ---
+    // Extract all tokens with their % flag
+    const tokens = [...rest.matchAll(/([-]?\d+(?:\.\d+)?)\s*(%?)/g)]
+      .map(t => ({ val: parseFloat(t[1]), isPct: t[2] === '%' }));
+
+    const percIdxs = tokens.map((t,i) => t.isPct ? i : -1).filter(x => x >= 0);
+
+    if (percIdxs.length === 0) {
+      // No % at all — pure number columns: Pred Pre Post (minimal)
+      const nums = tokens.map(t => t.val);
+      if (nums.length >= 3) return { preL:nums[1], prePct:null, postL:nums[2], postPct:null };
+      if (nums.length >= 2) return { preL:nums[0], prePct:null, postL:nums[1], postPct:null };
+      return { preL:null, prePct:null, postL:null, postPct:null };
+    }
+
+    // First % = Pre%Pred
+    const firstPctIdx = percIdxs[0];
+    const preL   = firstPctIdx > 0 ? tokens[firstPctIdx - 1].val : null;
+    const prePct = tokens[firstPctIdx].val;
+
+    // PostL = the number immediately after first % (regardless of Trial columns)
+    const postL = (firstPctIdx + 1 < tokens.length) ? tokens[firstPctIdx + 1].val : null;
+
+    // Post%Pred: 
+    //   If last token is %, it's likely %Change → use second-to-last %
+    //   Otherwise use last %
+    let postPct = null;
+    if (percIdxs.length >= 2) {
+      // Check if last % could be %Change (can be negative, typically small)
+      const lastPctIdx = percIdxs[percIdxs.length - 1];
+      const lastVal = tokens[lastPctIdx].val;
+      const isLikelyChange = Math.abs(lastVal) <= 30 && percIdxs.length >= 3;
+      const postPctIdx = isLikelyChange
+        ? percIdxs[percIdxs.length - 2]
+        : lastPctIdx;
+      // Only use if it's different from Pre%Pred index
+      if (postPctIdx !== firstPctIdx) postPct = tokens[postPctIdx].val;
+    }
+
+    return { preL, prePct, postL, postPct };
   }
-  return { prePct:null,preL:null,postPct:null,postL:null };
+  return { prePct:null, preL:null, postPct:null, postL:null };
 }
 
 function classifySpiro(d) {
