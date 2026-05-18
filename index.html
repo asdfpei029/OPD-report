@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.7 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.8 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -544,22 +544,49 @@ dz.addEventListener('drop',e=>{
   if (files.length) handleImages(files);
 });
 
-function handleImages(files) {
-  pendingImages = files;
+function handleImages(newFiles) {
+  // ACCUMULATE images (don't replace) so user can paste image 1 then image 2
+  for (const f of newFiles) pendingImages.push(f);
+
   const pc = $('image-preview-container');
-  const pl = $('preview-list');
-  pl.innerHTML = '';
   pc.style.display = 'block';
   $('gemini-result-preview').style.display = 'none';
-  for (const f of files) {
+  renderPreviews();
+}
+
+function renderPreviews() {
+  const pl = $('preview-list');
+  pl.innerHTML = '';
+  pendingImages.forEach((f, idx) => {
     const r = new FileReader();
     r.onload = ev => {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'position:relative;flex-shrink:0;';
+
       const img = document.createElement('img');
       img.src = ev.target.result;
-      pl.appendChild(img);
+      img.style.cssText = 'height:80px;width:auto;border-radius:8px;border:1px solid var(--border);display:block;';
+
+      const del = document.createElement('button');
+      del.textContent = '✕';
+      del.style.cssText = 'position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;background:#ef4444;color:#fff;border:none;cursor:pointer;font-size:10px;line-height:1;display:flex;align-items:center;justify-content:center;padding:0;';
+      del.onclick = () => {
+        pendingImages.splice(idx, 1);
+        renderPreviews();
+        if (!pendingImages.length) $('image-preview-container').style.display = 'none';
+      };
+
+      const badge = document.createElement('div');
+      badge.textContent = idx + 1;
+      badge.style.cssText = 'position:absolute;bottom:2px;left:4px;background:rgba(0,0,0,0.55);color:#fff;font-size:10px;padding:1px 5px;border-radius:4px;font-family:IBM Plex Mono,monospace;';
+
+      wrap.appendChild(img);
+      wrap.appendChild(del);
+      wrap.appendChild(badge);
+      pl.appendChild(wrap);
     };
     r.readAsDataURL(f);
-  }
+  });
 }
 
 // ============================================================
@@ -966,19 +993,18 @@ function findBDTParam(lines, keyRegex) {
     // PostL = the number immediately after first % (regardless of Trial columns)
     const postL = (firstPctIdx + 1 < tokens.length) ? tokens[firstPctIdx + 1].val : null;
 
-    // Post%Pred: 
-    //   If last token is %, it's likely %Change → use second-to-last %
-    //   Otherwise use last %
+    // Post%Pred:
+    //   Layout with Trial: Pred Pre Pre% Post T1 T2 T3 PostPred% Change%
+    //   Layout with ZScore: Pred Pre Pre% Post PostPred% ZScore Change%
+    //   In both cases: second-to-last % if last % is %Change (small abs value)
+    //   Z-Score values are small floats (like -2.7) — NOT % tokens, safe to ignore
     let postPct = null;
     if (percIdxs.length >= 2) {
-      // Check if last % could be %Change (can be negative, typically small)
-      const lastPctIdx = percIdxs[percIdxs.length - 1];
-      const lastVal = tokens[lastPctIdx].val;
-      const isLikelyChange = Math.abs(lastVal) <= 30 && percIdxs.length >= 3;
-      const postPctIdx = isLikelyChange
-        ? percIdxs[percIdxs.length - 2]
-        : lastPctIdx;
-      // Only use if it's different from Pre%Pred index
+      const lastPctIdx  = percIdxs[percIdxs.length - 1];
+      const lastVal     = tokens[lastPctIdx].val;
+      // %Change is typically ≤ 50 in absolute value and can be negative
+      const isChange    = Math.abs(lastVal) <= 50 && percIdxs.length >= 3;
+      const postPctIdx  = isChange ? percIdxs[percIdxs.length - 2] : lastPctIdx;
       if (postPctIdx !== firstPctIdx) postPct = tokens[postPctIdx].val;
     }
 
@@ -988,14 +1014,23 @@ function findBDTParam(lines, keyRegex) {
 }
 
 function classifySpiro(d) {
-  const { fev1fvc, fef_pred, fvc_pred, label='' } = d;
+  const { fev1fvc, fef_pred, fef_fvc_ratio, fvc_pred, label='' } = d;
   const pfx = label ? label+' ' : '';
+
   if (fev1fvc!=null && fev1fvc<70)
     return { type:'obs', text:`Obstructive ventilatory defect\n(${pfx}FEV1/FVC: ${fmtF(fev1fvc)}%)` };
-  if (fef_pred!=null && fef_pred<65)
-    return { type:'sus_obs', text:`Suspected obstructive ventilatory impairment\n(${pfx}FEV1/FVC: ${fev1fvc!=null?fmtF(fev1fvc):'?'}%, FEF25-75: ${fmtF(fef_pred)}%pred)` };
+
+  // FEF25-75/FVC ratio check (calculated from measured values)
+  const fefCheck = fef_fvc_ratio!=null ? fef_fvc_ratio : fef_pred;
+  if (fefCheck!=null && fefCheck<65)
+    return {
+      type:'sus_obs',
+      text:`Suspected obstructive ventilatory impairment\n(${pfx}FEV1/FVC: ${fev1fvc!=null?fmtF(fev1fvc):'?'}%, FEF25-75${fef_fvc_ratio!=null?'/FVC':''}: ${fmtF(fefCheck)}%${fef_fvc_ratio!=null?'':' pred'})`
+    };
+
   if (fvc_pred!=null && fvc_pred<80)
     return { type:'sus_res', text:`Suspected restrictive ventilatory impairment\n(${pfx}FVC: ${fmtF(fvc_pred)}%pred)` };
+
   return { type:'normal', text:'Normal spirometry' };
 }
 
@@ -1033,11 +1068,24 @@ function analyzeFullPFT(text) {
 function analyzeFlowVolume(text) {
   const lines = text.split('\n');
   const g = r => findPFTParam(lines,r);
-  const fvc  = g(/^FVC/i);
-  const ratio = g(/FEV\s*1\s*[/\\%]\s*FVC/i);
-  const fef  = g(/FEF\s*25[-\s]?75|MMEF|MFEF/i);
+  const fvc   = g(/^FVC/i);
+  const ratio = g(/FEV\s*1\s*[\/\\%]\s*FVC/i);
+  const fef   = g(/FEF\s*25[-\s]?75|MMEF|MFEF/i);
+
   const fev1fvc = ratio.measuredRaw ? parseVal(ratio.measuredRaw,'ratio') : ratio.predPct;
-  return classifySpiro({ fev1fvc, fef_pred:fef.predPct, fvc_pred:fvc.predPct }).text;
+
+  // Calculate FEF25-75/FVC from measured values if available
+  let fef_fvc_ratio = null;
+  const fefMeas = fef.measuredRaw ? parseFloat(fef.measuredRaw) : null;
+  const fvcMeas = fvc.measuredRaw ? parseFloat(fvc.measuredRaw) : null;
+  if (fefMeas && fvcMeas && fvcMeas > 0) {
+    // Both in L or L/s — ratio gives a fraction, multiply by 100 for %
+    let ratio_val = (fefMeas / fvcMeas) * 100;
+    // Sanity check: result should be 10-200%
+    if (ratio_val > 5 && ratio_val < 300) fef_fvc_ratio = ratio_val;
+  }
+
+  return classifySpiro({ fev1fvc, fef_pred: fef.predPct, fef_fvc_ratio, fvc_pred: fvc.predPct }).text;
 }
 
 // ============================================================
@@ -1059,8 +1107,21 @@ function analyzeBDT(text) {
   const fev1PrePct  = fev1.prePct;   // Pre%Pred col
   const fev1PostPct = fev1.postPct;  // Post%Pred col (near end of row)
 
-  const preCls  = classifySpiro({ fev1fvc:preFEV1FVC,  fef_pred:fef.prePct,  fvc_pred:fvc.prePct,  label:'pre' });
-  const postCls = classifySpiro({ fev1fvc:postFEV1FVC, fef_pred:fef.postPct, fvc_pred:fvc.postPct, label:'post' });
+  // Calculate FEF25-75/FVC ratio from measured values
+  const calcFEFratio = (fefL, fvcL) => {
+    if (!fefL || !fvcL || fvcL <= 0) return null;
+    let f = fefL, v = fvcL;
+    // Normalize if stored as mL
+    if (f > 20) f /= 1000; if (v > 20) v /= 1000;
+    if (f > 8)  f /= 10;   if (v > 8)  v /= 10;
+    const r = (f / v) * 100;
+    return (r > 5 && r < 300) ? r : null;
+  };
+  const preFEFratio  = calcFEFratio(fef.preL,  fvc.preL);
+  const postFEFratio = calcFEFratio(fef.postL, fvc.postL);
+
+  const preCls  = classifySpiro({ fev1fvc:preFEV1FVC,  fef_pred:fef.prePct,  fef_fvc_ratio:preFEFratio,  fvc_pred:fvc.prePct,  label:'pre' });
+  const postCls = classifySpiro({ fev1fvc:postFEV1FVC, fef_pred:fef.postPct, fef_fvc_ratio:postFEFratio, fvc_pred:fvc.postPct, label:'post' });
 
   let diagText = '';
   const types = [preCls.type, postCls.type];
@@ -1119,50 +1180,63 @@ function analyzeIOS(text) {
   const lines = text.split('\n');
 
   /**
-   * IOS parameter finder — handles multiple formats:
-   * Format A (standard):  "R5 (L/s)   0.40  0.42  112%"
-   * Format B (no space):  "R5HzkPa/(L/s)  0.40  0.42  105"  ← %(B/P) no % sign
-   * Format C (Gemini):    "R5 [L/s] Pred=0.40 Meas=0.42 Pct=112%"
-   * Format D (OCR text):  "R5Hz kPa/(L/s)  0.40   0.42   105"
+   * IOS parameter finder — handles:
+   * Format A: "R5 (L/s)   0.40  0.42  112%"           standard with % sign
+   * Format B: "R5HzkPa/(L/s)  0.31  0.32  101"        %(B/P) WITHOUT % sign
+   * Format C: "R5 [L/s] Pred=0.40 Meas=0.42 Pct=112%" Gemini structured
+   * Format D: "X5Hz kPa/(L/s) -0.03  -0.11  341"      negative values
    *
-   * Returns: { pred, meas, pct }
-   * - pred = reference/predicted value
-   * - meas = measured/best value
-   * - pct  = %pred or %(B/P) — used for R5 classification
+   * Column order: Pred  Best/Meas  %(B/P_or_pred)
+   * For X5: pred can be negative (-0.03)
+   * %(B/P) column: integer, typically 50-400 range, NO % sign in Format B
    */
   const findIOS = (regex) => {
     for (const line of lines) {
       if (!regex.test(line)) continue;
       const m = line.match(regex);
       const rest = line.slice(m.index + m[0].length)
-        .replace(/(\d)\s+\.\s+(\d)/g,'$1.$2')  // fix split decimals
-        .replace(/kPa\s*\/\s*\(L\/s\)/gi,'')    // strip units
-        .replace(/kPa\/L/gi,'').replace(/1\/s/gi,'');
+        .replace(/(\d)\s+\.\s+(\d)/g, '$1.$2')
+        .replace(/kPa\s*\/\s*\(L\/s\)/gi, '')
+        .replace(/kPa\/L/gi, '').replace(/\b1\/s\b/gi, '');
 
-      // Format C: key=value pairs
+      // Format C: key=value pairs (from Gemini)
       if (/\w+=/.test(rest)) {
         const pairs = {};
-        const kv = rest.matchAll(/(\w+)\s*=\s*([-\d.]+)/g);
-        for (const [,k,v] of kv) pairs[k.toLowerCase()] = parseFloat(v);
+        for (const [,k,v] of rest.matchAll(/(\w+)\s*=\s*([-\d.]+)/g))
+          pairs[k.toLowerCase()] = parseFloat(v);
         return { pred: pairs.pred??null, meas: pairs.meas??pairs.best??null, pct: pairs.pct??null };
       }
 
-      // Format A/B/D: positional numbers
-      const nums = [...rest.matchAll(/([-]?\d+(?:\.\d+)?)/g)].map(x=>parseFloat(x[1]));
+      // Format A/B/D: extract ALL numbers including negatives
+      // Pattern: optional-sign digit(s) optional-decimal
+      const nums = [...rest.matchAll(/([-]?\d+(?:\.\d+)?)/g)]
+        .map(x => parseFloat(x[1]))
+        .filter(n => !isNaN(n));
+
       if (!nums.length) return {};
 
-      // Filter out date-like numbers (e.g. 25-11-25 → skipped already by regex)
-      // nums layout: [pred?, meas, pct?] or [meas, pct?]
+      // Layout: [pred, meas, pct]
+      // pct is always a positive integer typically 50-500
+      // pred for R5/R20 is positive small (0.2-1.5)
+      // pred for X5 can be negative (-0.03 to -0.15)
+      // meas is similar range to pred
+      // pct is >> 20
+
       if (nums.length >= 3) {
-        // If third num > 20, it's likely %pred
-        return { pred: nums[0], meas: nums[1], pct: nums[2] };
+        // Third number > 20 and positive → it's pct
+        if (nums[2] > 20 && nums[2] > 0) {
+          return { pred: nums[0], meas: nums[1], pct: nums[2] };
+        }
+        // Otherwise fallback
+        return { pred: nums[0], meas: nums[1], pct: null };
       }
       if (nums.length === 2) {
-        // Could be [pred, meas] or [meas, pct]
+        // Two numbers: if second > 20 → [pred, pct]; else [pred, meas]
         return nums[1] > 20
           ? { pred: nums[0], meas: null, pct: nums[1] }
           : { pred: nums[0], meas: nums[1], pct: null };
       }
+      // Single number: it's the measured value
       return { pred: null, meas: nums[0], pct: null };
     }
     return {};
