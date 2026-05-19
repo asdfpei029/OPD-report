@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 20260518.15 · PFT_CT_Extractor</span>
+  <span>Ver: 20260518.16 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -1001,7 +1001,7 @@ function findPFTParam(lines, keyRegex) {
   for (const line of lines) {
     if (!keyRegex.test(line)) continue;
     const m = line.match(keyRegex);
-    const rest = line.slice(m.index + m[0].length);
+    const rest = line.slice(m.index + m[0].length).replace(/\[.*?\]/g, '');
     if (!/\d/.test(rest)) continue;
 
     // --- Gemini key=value format ---
@@ -1063,7 +1063,8 @@ function findBDTParam(lines, keyRegex) {
   for (const line of lines) {
     if (!keyRegex.test(line)) continue;
     const m = line.match(keyRegex);
-    const rest = line.slice(m.index + m[0].length);
+    // Strip unit brackets [L], [%], [L/s] to prevent e.g. FEV1%FVC [%] → spurious '1%' token
+    const rest = line.slice(m.index + m[0].length).replace(/\[.*?\]/g, '');
     if (!/\d/.test(rest)) continue;
 
     // --- Gemini key=value format ---
