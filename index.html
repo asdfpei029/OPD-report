@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 3.1.3 · PFT_CT_Extractor</span>
+  <span>Ver: 3.1.4 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -1526,8 +1526,9 @@ function analyzeCT(text) {
     }
 
     // Modifier S — must come BEFORE Category check (Modifier S text contains "category 0-4")
-    if (/Modifier\s*S/i.test(trimmed) && isChecked(trimmed)) {
-      const descM = trimmed.match(/Modifier\s*S[^(（]*[（(]([^)）]+)[)）]/i);
+    // Also handles "Category S" (alternative naming in some report formats)
+    if (/Modifier\s*S|Category\s*S\b/i.test(trimmed) && isChecked(trimmed)) {
+      const descM = trimmed.match(/(?:Modifier|Category)\s*S[^(（]*[（(]([^)）]+)[)）]/i);
       assessment.push(descM ? 'Modifier S (' + descM[1].trim() + ')' : 'Modifier S');
       continue;
     }
@@ -1542,8 +1543,8 @@ function analyzeCT(text) {
       continue;
     }
 
-    // Modifier S (already handled above, skip duplicate)
-    if (/Modifier\s*S/i.test(trimmed) && isChecked(trimmed)) {
+    // Modifier S / Category S (already handled above, skip duplicate)
+    if (/Modifier\s*S|Category\s*S\b/i.test(trimmed) && isChecked(trimmed)) {
       const descM = trimmed.match(/Modifier\s*S[^(（]*[（(]([^)）]+)[)）]/i);
       assessment.push(descM ? 'Modifier S (' + descM[1].trim() + ')' : 'Modifier S');
       continue;
