@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 3.1.6 · PFT_CT_Extractor</span>
+  <span>Ver: 3.1.7 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -1521,7 +1521,19 @@ function analyzeCT(text) {
     if (!trimmed) continue;
     if (FILTER_RE.test(trimmed) || QUALITY_RE.test(trimmed)) continue;
     if (/^CTDIvol|^Total DLP|^LDCT重度|^詳細規範|\.{3,}|^…+/i.test(trimmed)) continue;
-    if (/^\[?\s*Impression\s*\]?:?/i.test(trimmed)) { i = lines.length; continue; }
+    if (/^\[?\s*Impression\s*\]?:?/i.test(trimmed)) {
+      // Skip numbered impression items (1. 2. 3.) but stop at Overall recommendation / Lung-RADS
+      while (i < lines.length) {
+        const nt = lines[i].trim();
+        if (!nt) { i++; continue; }
+        // Stop skipping when we hit structured sections
+        if (/Overall recommendation|Lung-RADS|Category\s*[0-4XS]|Modifier\s*S|Category\s*S\b/i.test(nt)) break;
+        // Also stop if we see a checked item (■, v, etc.)
+        if (/[■⬛✓√]/.test(nt) || /^\[?\s*[vVxX]\s*\]/.test(nt)) break;
+        i++;
+      }
+      continue;
+    }
 
     // Lung-RADS Descriptor header
     if (/Lung-RADS.*Descriptor/i.test(trimmed)) {
