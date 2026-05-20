@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 3.1.2 · PFT_CT_Extractor</span>
+  <span>Ver: 3.1.3 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -1826,8 +1826,55 @@ function analyzeCT(text) {
   const fA = dedup(assessment);   fA.sort((a,b) => aRank(a)-aRank(b));
   const fO = dedup(others);
 
-  const all = [...fN, ...fA, ...fO];
-  return all.length ? all.map(x => '• ' + x).join('\n') : '(No structured findings — check input format)';
+  // ---- Separate lung findings from Modifier S findings ----
+  const LUNG_FINDING_RE = /emphysema|bronchiectasis|bronchitis|tree.in.bud|centrilobular|old pulmonary|interstitial|atelecta|atelecti|fibrotic|mucus plug|consolidat/i;
+  const MODIFIER_S_RE   = /coronary|calcif.*artery|artery.*calcif|lymph|pleural effusion|pericardial|pulmonary artery|pulmonary hypert|scoliosis|spondylosis|pancrea|hepatic|liver|gallbladder|kidney|adrenal|thyroid|vertebr|spine|mediastin|aorta|esophag/i;
+
+  const lungFindings   = fO.filter(x => LUNG_FINDING_RE.test(x));
+  const modSFindings   = fO.filter(x => !LUNG_FINDING_RE.test(x));
+
+  // Check if Modifier S was checked
+  const hasModifierS = fA.some(a => /^Modifier S/i.test(a));
+
+  // Build final output sections
+  const outItems = [];
+
+  // 1. Nodules
+  fN.forEach(x => outItems.push('• ' + x));
+
+  // 2. Assessment (No prior, Lung-RADS, Category — but NOT Modifier S yet)
+  fA.filter(a => !/^Modifier S/i.test(a)).forEach(x => outItems.push('• ' + x));
+
+  // 3. 其他肺部發現 (lung findings, independent)
+  if (lungFindings.length > 0) {
+    outItems.push('• 其他肺部發現: ' + lungFindings.join(' / '));
+  }
+
+  // 4. Modifier S block (if checked)
+  if (hasModifierS && modSFindings.length > 0) {
+    let modBlock = '• Modifier S (clinically significant findings unrelated to lung cancer):';
+    modSFindings.forEach(f => {
+      if (/\n/.test(f)) {
+        // Multi-line (Other chest/abdominal findings with numbered list)
+        const lines2 = f.split('\n');
+        modBlock += '\n  - ' + lines2[0];  // title line
+        lines2.slice(1).forEach(l => modBlock += '\n  ' + l);
+      } else {
+        modBlock += '\n  - ' + f;
+      }
+    });
+    outItems.push(modBlock);
+  } else if (hasModifierS) {
+    outItems.push('• Modifier S (clinically significant findings unrelated to lung cancer)');
+  } else {
+    // Modifier S not checked — output others normally
+    modSFindings.forEach(x => outItems.push('• ' + x));
+  }
+
+  // 5. 請至門診就診 (from assessment)
+  fA.filter(a => /請至門診/i.test(a)).forEach(x => outItems.push('• ' + x));
+
+  return outItems.length ? outItems.join('\n') : '(No structured findings — check input format)';
 }
 
 // ============================================================
