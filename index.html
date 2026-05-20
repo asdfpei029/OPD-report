@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 3.1.4 · PFT_CT_Extractor</span>
+  <span>Ver: 3.1.6 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -1446,7 +1446,11 @@ function analyzeCT(text) {
                       'Centrilobular','Old pulmonary TB','Interstitial lung disease'];
 
   // ---- Check marker detection ----
-  const isChecked = line => /\[\s*[vVxX]\s*\]|[■⬛✓√]/.test(line);
+  // Handles: [v] [V] [x] ■ ✓ √ ⬛ AND lone 'v'/'V' as whole word (some report formats use bare v)
+  const isChecked = line => {
+    return /\[\s*[vVxX]\s*\]|[■⬛✓√]/.test(line) ||
+           /\bv\b/i.test(line);  // bare v as whole word (not inside other words)
+  };
 
   function checkedContent(line) {
     if (!isChecked(line)) return null;
@@ -1598,8 +1602,22 @@ function analyzeCT(text) {
     // ≧6mm total number
     if (/Lung nodule.*(?:≧6mm|>=6mm|total number)/i.test(trimmed)) {
       if (isChecked(trimmed)) {
-        const numM = trimmed.match(/(?:\[\s*[■vVxX]\s*\]|■)\s*(\d+|>=?\s*\d+)/i)
+        // Count may be on same line or on the next line ("Total number v 1 □ 2...")
+        let numM = trimmed.match(/total number\b.*?(?:\bv\b|■|\[\s*[vVxX]\s*\])\s*(\d+|>=?\s*\d+)/i)
           || trimmed.match(/total number[^\d]*(\d+)/i);
+
+        // If count not on this line, check next non-empty line for "Total number"
+        if (!numM) {
+          let ni = i;
+          while (ni < lines.length && !lines[ni].trim()) ni++;
+          const nextL = lines[ni] ? lines[ni].trim() : '';
+          if (/total number/i.test(nextL)) {
+            numM = nextL.match(/total number\b.*?(?:\bv\b|■|\[\s*[vVxX]\s*\])\s*(\d+|>=?\s*\d+)/i)
+              || nextL.match(/total number[^\d]*(\d+)/i);
+            if (numM) i = ni + 1;  // consume the total number line
+          }
+        }
+
         if (numM) nodules.push('Lung nodule(s) ≧6mm: total number ' + numM[1].trim());
       }
       continue;
@@ -1636,8 +1654,14 @@ function analyzeCT(text) {
           const cc = checkedContent(nt);
           if (cc) cc.forEach(val => {
             const v = val.trim();
-            if (/solid|ground.?glass|part.?solid|calcif|non.?solid/i.test(v)) nd.density = v;
-            if (/RUL|RML|RLL|LUL|LLL/i.test(v)) nd.lobe = v;
+            // Density: stop at 'Lobe:' to avoid capturing lobe info into density
+            if (/solid|ground.?glass|part.?solid|calcif|non.?solid/i.test(v)) {
+              nd.density = v.replace(/\s*Lobe\s*:.*$/i, '').trim();
+            }
+            if (/RUL|RML|RLL|LUL|LLL/i.test(v)) {
+              // Clean lobe: remove 'Lobe:' prefix and unchecked options
+              nd.lobe = v.replace(/^Lobe\s*:\s*/i,'').replace(/□.*$/,'').trim();
+            }
             if (/unchanged|enlarging|newly|decreased|increased|stable|No prior/i.test(v)) nd.status = v;
           });
         }
@@ -1667,8 +1691,14 @@ function analyzeCT(text) {
         const parts = [];
         if (nd.size)    parts.push(nd.size);
         if (nd.density) parts.push(nd.density);
-        if (nd.lobe)    parts.push(nd.lobe + (nd.seIm ? ' '+nd.seIm : ''));
-        else if (nd.seIm) parts.push(nd.seIm);
+        if (nd.lobe) {
+          // Only append seIm if not already in lobe string
+          const lobeHasSE = nd.seIm && nd.lobe.replace(/\s/g,'').toLowerCase()
+            .includes(nd.seIm.replace(/[()]/g,'').toLowerCase().slice(0,6));
+          parts.push(nd.lobe + (nd.seIm && !lobeHasSE ? ' '+nd.seIm : ''));
+        } else if (nd.seIm) {
+          parts.push(nd.seIm);
+        }
         if (nd.status)  parts.push(nd.status);
         textToAdd = 'Lung nodule ' + num + ': ' + parts.join(', ');
       }
