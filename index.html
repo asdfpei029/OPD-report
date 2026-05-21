@@ -312,7 +312,7 @@ textarea:focus{border-color:var(--primary);}
 
 <!-- Version -->
 <div class="ver-badge">
-  <span>Ver: 3.1.7 · PFT_CT_Extractor</span>
+  <span>Ver: 3.1.8 · PFT_CT_Extractor</span>
 </div>
 
 </div><!-- /container -->
@@ -1871,37 +1871,38 @@ function analyzeCT(text) {
 
   // ---- Separate lung findings from Modifier S findings ----
   const LUNG_FINDING_RE = /emphysema|bronchiectasis|bronchitis|tree.in.bud|centrilobular|old pulmonary|interstitial|atelecta|atelecti|fibrotic|mucus plug|consolidat/i;
-  const MODIFIER_S_RE   = /coronary|calcif.*artery|artery.*calcif|lymph|pleural effusion|pericardial|pulmonary artery|pulmonary hypert|scoliosis|spondylosis|pancrea|hepatic|liver|gallbladder|kidney|adrenal|thyroid|vertebr|spine|mediastin|aorta|esophag/i;
 
-  const lungFindings   = fO.filter(x => LUNG_FINDING_RE.test(x));
-  const modSFindings   = fO.filter(x => !LUNG_FINDING_RE.test(x));
+  const lungFindings = fO.filter(x => LUNG_FINDING_RE.test(x));
+  const modSFindings = fO.filter(x => !LUNG_FINDING_RE.test(x));
 
   // Check if Modifier S was checked
   const hasModifierS = fA.some(a => /^Modifier S/i.test(a));
 
-  // Build final output sections
+  // Build final output — clinical order:
+  // Assessment (Comparison → Lung-RADS → Category) → Nodules → 肺部發現 → Modifier S → 請至門診
   const outItems = [];
 
-  // 1. Nodules
+  // 1. Assessment (excluding Modifier S and 請至門診)
+  fA.filter(a => !/^Modifier S/i.test(a) && !/請至門診/i.test(a))
+    .forEach(x => outItems.push('• ' + x));
+
+  // 2. Nodules
   fN.forEach(x => outItems.push('• ' + x));
 
-  // 2. Assessment (No prior, Lung-RADS, Category — but NOT Modifier S yet)
-  fA.filter(a => !/^Modifier S/i.test(a)).forEach(x => outItems.push('• ' + x));
-
-  // 3. 其他肺部發現 (lung findings, independent)
+  // 3. 其他肺部發現
   if (lungFindings.length > 0) {
     outItems.push('• 其他肺部發現: ' + lungFindings.join(' / '));
   }
 
-  // 4. Modifier S block (if checked)
+  // 4. Modifier S block or plain other findings
   if (hasModifierS && modSFindings.length > 0) {
     let modBlock = '• Modifier S (clinically significant findings unrelated to lung cancer):';
     modSFindings.forEach(f => {
       if (/\n/.test(f)) {
-        // Multi-line (Other chest/abdominal findings with numbered list)
-        const lines2 = f.split('\n');
-        modBlock += '\n  - ' + lines2[0];  // title line
-        lines2.slice(1).forEach(l => modBlock += '\n  ' + l);
+        // Multi-line (Other chest/abdominal with numbered list)
+        const subLines = f.split('\n');
+        modBlock += '\n  - ' + subLines[0];
+        subLines.slice(1).forEach(l => modBlock += '\n  ' + l);
       } else {
         modBlock += '\n  - ' + f;
       }
@@ -1910,14 +1911,21 @@ function analyzeCT(text) {
   } else if (hasModifierS) {
     outItems.push('• Modifier S (clinically significant findings unrelated to lung cancer)');
   } else {
-    // Modifier S not checked — output others normally
     modSFindings.forEach(x => outItems.push('• ' + x));
   }
 
-  // 5. 請至門診就診 (from assessment)
+  // 5. 請至門診就診
   fA.filter(a => /請至門診/i.test(a)).forEach(x => outItems.push('• ' + x));
 
-  return outItems.length ? outItems.join('\n') : '(No structured findings — check input format)';
+  // Final dedup pass (catches 'No prior CT available' appearing twice)
+  const seen = new Set();
+  const finalOut = outItems.filter(item => {
+    const key = item.replace(/\s+/g,'').toLowerCase().slice(0,40);
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+
+  return finalOut.length ? finalOut.join('\n') : '(No structured findings — check input format)';
 }
 
 // ============================================================
